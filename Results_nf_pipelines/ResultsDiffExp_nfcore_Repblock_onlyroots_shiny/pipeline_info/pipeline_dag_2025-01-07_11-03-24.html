@@ -1,0 +1,201 @@
+<!--
+  ~ Copyright 2013-2024, Seqera Labs
+  ~
+  ~ Licensed under the Apache License, Version 2.0 (the "License");
+  ~ you may not use this file except in compliance with the License.
+  ~ You may obtain a copy of the License at
+  ~
+  ~     http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+<html>
+<head>
+<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1, maximum-scale=1">
+</head>
+<body>
+<pre class="mermaid" style="text-align: center;">
+flowchart TB
+    subgraph " "
+    v0["Channel.of"]
+    v1["Channel.of"]
+    v5["Channel.from"]
+    v6[" "]
+    v7[" "]
+    v24[" "]
+    v25[" "]
+    v35[" "]
+    v36[" "]
+    v48["ch_logfc"]
+    v49["ch_padj"]
+    v83["Channel.of"]
+    v86["Channel.from"]
+    v88["Channel.from"]
+    v89["Channel.from"]
+    v90["Channel.from"]
+    v115["contrast_stats_assay"]
+    end
+    subgraph NFCORE_DIFFERENTIALABUNDANCE
+    subgraph DIFFERENTIALABUNDANCE
+    v8([GTF_TO_TABLE])
+    v13([VALIDATOR])
+    v17([CUSTOM_MATRIXFILTER])
+    v26([DESEQ2_NORM])
+    v37([DESEQ2_DIFFERENTIAL])
+    v50([FILTER_DIFFTABLE])
+    v62([PLOT_EXPLORATORY])
+    v74([PLOT_DIFFERENTIAL])
+    v116([SHINYNGS_APP])
+    v121([RMARKDOWNNOTEBOOK])
+    v128([MAKE_REPORT_BUNDLE])
+    v10(( ))
+    v11(( ))
+    v12(( ))
+    v21(( ))
+    v87(( ))
+    v105(( ))
+    end
+    end
+    subgraph " "
+    v9[" "]
+    v18[" "]
+    v19[" "]
+    v20[" "]
+    v27[" "]
+    v28[" "]
+    v29[" "]
+    v30[" "]
+    v31[" "]
+    v32[" "]
+    v33[" "]
+    v34[" "]
+    v38[" "]
+    v39[" "]
+    v40[" "]
+    v41[" "]
+    v42[" "]
+    v43[" "]
+    v44[" "]
+    v51[" "]
+    v52[" "]
+    v63[" "]
+    v64[" "]
+    v65[" "]
+    v66[" "]
+    v67[" "]
+    v68[" "]
+    v69[" "]
+    v70[" "]
+    v71[" "]
+    v72[" "]
+    v73[" "]
+    v75[" "]
+    v76[" "]
+    v117[" "]
+    v119["ch_versions"]
+    v122[" "]
+    v123[" "]
+    v124[" "]
+    v125[" "]
+    v129[" "]
+    v130[" "]
+    end
+    v0 --> v12
+    v1 --> v12
+    v5 --> v13
+    v6 --> v8
+    v7 --> v8
+    v8 --> v9
+    v8 --> v10
+    v8 --> v11
+    v10 --> v13
+    v12 --> v13
+    v13 --> v17
+    v13 --> v11
+    v13 --> v21
+    v17 --> v20
+    v17 --> v19
+    v17 --> v18
+    v17 --> v21
+    v24 --> v26
+    v25 --> v26
+    v11 --> v26
+    v21 --> v26
+    v26 --> v34
+    v26 --> v33
+    v26 --> v32
+    v26 --> v31
+    v26 --> v30
+    v26 --> v29
+    v26 --> v28
+    v26 --> v27
+    v26 --> v11
+    v35 --> v37
+    v36 --> v37
+    v11 --> v37
+    v21 --> v37
+    v37 --> v50
+    v37 --> v44
+    v37 --> v43
+    v37 --> v42
+    v37 --> v41
+    v37 --> v40
+    v37 --> v39
+    v37 --> v38
+    v37 --> v74
+    v37 --> v11
+    v37 --> v105
+    v48 --> v50
+    v49 --> v50
+    v50 --> v52
+    v50 --> v51
+    v11 --> v62
+    v62 --> v73
+    v62 --> v72
+    v62 --> v71
+    v62 --> v70
+    v62 --> v69
+    v62 --> v68
+    v62 --> v67
+    v62 --> v66
+    v62 --> v65
+    v62 --> v64
+    v62 --> v63
+    v62 --> v11
+    v11 --> v74
+    v74 --> v76
+    v74 --> v75
+    v74 --> v11
+    v83 --> v11
+    v86 --> v87
+    v88 --> v11
+    v89 --> v11
+    v90 --> v11
+    v115 --> v116
+    v11 --> v116
+    v105 --> v116
+    v116 --> v117
+    v116 --> v11
+    v11 --> v119
+    v11 --> v121
+    v87 --> v121
+    v121 --> v125
+    v121 --> v124
+    v121 --> v123
+    v121 --> v122
+    v121 --> v11
+    v11 --> v128
+    v128 --> v130
+    v128 --> v129
+
+</pre>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true });
+</script>
+</body>
+</html>
