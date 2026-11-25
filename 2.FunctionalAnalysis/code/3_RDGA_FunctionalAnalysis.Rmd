@@ -1,0 +1,3259 @@
+---
+title: "RDGA: 3_Functional_Enrichment_Analysis"
+author: "Viviana Ortiz"
+affiliation: "Root Haus Lab - Michigan State University"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  github_document:
+    toc: true
+---
+
+```{r options, eval = TRUE, echo = FALSE, results = 'hide'}
+
+rm(list=ls(all=TRUE)) #Removes all variables in the global environment
+
+Sys.time() # prints out the time and date you ran the code
+
+options(scipen = 999) # stops anything from being in scientific notation
+```
+
+```{r setupdir, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../")) #set wd to the project dir instead of the .Rmd file dir
+#The current working directory inside a notebook chunk is always the directory containing the notebook .Rmd file.  
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8, fig.height=8) # Set plot size to 8 inches wide and 6 inches tall
+```
+
+```{r cranmirror, eval = TRUE, echo = FALSE, include=FALSE}
+# Set a CRAN mirror (choose one appropriate for your location)
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+```
+
+Here I'm mostly following the Data Carpentry tutorial on RNAseq data analysis:
+https://scienceparkstudygroup.github.io/rna-seq-lesson/05-descriptive-plots/index.html
+
+Also, the clusterProfiler vignette:
+https://yulab-smu.top/biomedical-knowledge-mining-book/
+
+```{r lib, results = 'hide', message = FALSE, warning = FALSE}
+## Install core Bioconductor packages
+if (!requireNamespace("BiocManager"))
+   install.packages("BiocManager")
+#BiocManager::install()
+
+#BiocManager::install(version = "3.18") #To solve issue with biomart error in collect() function
+
+## Install package dependencies
+#BiocManager::install("Biostrings")
+#BiocManager::install("biomaRt")
+
+#install.packages("biomartr", dependencies = TRUE)
+
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("org.At.tair.db")
+
+#install.packages("clusterProfiler")
+#install.packages("org.At.tair.db")
+#install.packages("enrichplot")
+#install.packages("UpSetR")
+#install.packages("ggupset")
+
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("AnnotationHub")
+
+library("biomartr")
+library("clusterProfiler")
+library("tidyverse")
+library("enrichplot")
+suppressPackageStartupMessages(library("org.At.tair.db"))
+library("biomaRt")  # only use to remove cache bug
+library("AnnotationHub")
+library("UpSetR")
+library("ggupset")
+
+#to solve issue with biomart error in collect() function
+library(BiocManager)
+#BiocManager::install("BiocFileCache")
+
+#packageVersion("clusterProfiler")
+#packageVersion("DeSeq2")
+#packageVersion("WGCNA")
+```
+
+## RData import 
+
+Importing RData from the previous step (DE analysis)
+
+```{r import, eval = TRUE, echo = FALSE, include=FALSE}
+load("1.DEAnalysis/2_DE_results_list.RData")
+
+# Print the names of datasets loaded
+print(names(de_results_list))
+str(de_results_list)
+#view the first lines of the first dataset
+head(de_results_list[[1]])
+
+#Reorder de_results_list based on contrasts_df$id
+# Ensure contrasts_df$id is a character vector
+contrasts_order <- as.character(contrasts_df$id)
+
+# Reorder the list based on the order in contrasts_df$id
+de_results_list <- de_results_list[match(contrasts_order, names(de_results_list))]
+
+# Print the new order to verify
+print(names(de_results_list))
+head(de_results_list[[1]])
+```
+
+```{r }
+#Load DEGs ggvenn intersections. These are upregulated and downregulated genes for each contrast, with unique and shared (intersections) genes.
+#Load all RDS files in the folder: 1.DEAnalysis/output/DEGs_ggvenn_intersections_RDS/
+# List all .rds files in the directory with full paths
+rds_files <- list.files("1.DEAnalysis/output/DEGs_ggvenn_intersections_RDS", 
+                        pattern = "\\.rds$", 
+                        full.names = TRUE)
+rds_files
+
+# Load the RDS files into a list
+degs_ggvenn_list <- lapply(rds_files, readRDS)
+
+# Assign names to the list based on the filenames (removing the ".rds" extension)
+names(degs_ggvenn_list) <- sub("\\.rds$", "", basename(rds_files))
+
+# Print the names of the datasets loaded
+print(names(degs_ggvenn_list))
+str(degs_ggvenn_list)
+head(degs_ggvenn_list[[1]])
+
+#save the environment until now
+#save.image("2.FunctionalAnalysis/3_Functional_Analysis.RData")
+load("2.FunctionalAnalysis/3_Functional_Analysis.RData")
+```
+
+## Unique Differentially expressed genes by grouping them into unique subsets per contrast
+Unique DEGs lists from ggvenn intersections, adding log2 fold changes and other columns from de_results_list
+
+Generate a new list where each subset is extracted from de_results_list based on the item column from degs_ggvenn_list, while keeping the same format as de_results_list and
+adding the id and name columns from degs_ggvenn_list
+Iterates through degs_ggvenn_list, which contains the intersection details.
+Extracts the name and item columns from each row.
+Splits the item column into a vector of gene IDs.
+Finds the corresponding dataset in de_results_list using name as a key.
+Subsets de_results_list using the gene_id column to match genes from item.
+Adds the id and name columns to the subsetted data.
+Stores the subsetted data in degs_subset_list, ensuring unique names using both venn_name and id.
+
+```{r uniquedegs}
+# Create an empty list to store the unique subset results
+degs_unique_list <- list()
+
+# Iterate over each element in degs_ggvenn_list
+for (venn_name in names(degs_ggvenn_list)) {
+  venn_data <- degs_ggvenn_list[[venn_name]]
+  
+  # Iterate over each row in the tibble
+  for (i in seq_len(nrow(venn_data))) {
+    contrast_name <- venn_data$name[i]
+    gene_ids <- unlist(strsplit(venn_data$item[i], ", "))  # Convert item column to gene vector
+    
+    # Check if the contrast_name exists in de_results_list
+    if (contrast_name %in% names(de_results_list)) {
+      # Subset based on gene_id
+      subset_data <- de_results_list[[contrast_name]][de_results_list[[contrast_name]]$gene_id %in% gene_ids, ]
+      
+      # Add id and name columns
+      subset_data$id <- venn_data$id[i]
+      subset_data$name <- venn_data$name[i]
+      
+      # Store in the new list using a unique key
+      key_name <- paste0(venn_name, "_", venn_data$id[i])
+      degs_unique_list[[key_name]] <- subset_data
+    }
+  }
+}
+
+# Print structure of the new unique subset list
+str(degs_unique_list)
+print(names(degs_unique_list))
+str(degs_unique_list[[1]])
+head(degs_unique_list[[1]])
+
+# Get unique values for id and name columns
+unique(degs_unique_list[[1]]$id)  
+unique(degs_unique_list[[1]]$name)
+```
+
+## Functional Enrichment Analysis
+Modified from the Data Carpentry tutorial on RNAseq data analysis:
+https://scienceparkstudygroup.github.io/rna-seq-lesson/05-descriptive-plots/index.html
+
+One important goal is to gain a higher view and not only deal with individual genes but understand which pathways are involved in the response.
+
+Once we obtain a list of genes, we have multiple analysis to perform to go beyond a simple list of genes:
+
+* Annotating our list of genes with cross-databases identifiers and descriptions (Entrezid, Uniprot, KEGG, etc.).
+* Performing Over-Representation Analysis (ORA) or Gene Set Enrichment Analysis (GSEA) using R or webtools.
+* Interpreting the results.
+
+From: https://yulab-smu.top/biomedical-knowledge-mining-book/enrichment-overview.html#ora-algorithm
+
+## Over Representation Analysis (ORA) vs. Gene Set Enrichment Analysis (GSEA)
+Over Representation Analysis (ORA) (Boyle et al. 2004) is a widely used approach to determine whether known biological functions or processes are over-represented (= enriched) in an experimentally-derived gene list, e.g. a list of differentially expressed genes (DEGs).
+
+A common approach to analyzing gene expression profiles is identifying differentially expressed genes that are deemed interesting. The ORA enrichment analysis is based on these differentially expressed genes. This approach will find genes where the difference is large and will fail where the difference is small, but evidenced in coordinated way in a set of related genes. Gene Set Enrichment Analysis (GSEA)(Subramanian et al. 2005) directly addresses this limitation. All genes can be used in GSEA; GSEA aggregates the per gene statistics across genes within a gene set, therefore making it possible to detect situations where all genes in a predefined set change in a small but coordinated way. This is important since it is likely that many relevant phenotypic differences are manifested by small but consistent changes in a set of genes.
+
+## Over Representation Analysis (ORA)
+
+### Differentially expressed gene lists
+
+The differentially expressed genes for each comparison for all tissues (unique and shared) are stored in the degs_unique_list object. This object contains the unique DEGs for each comparison, with the id and name columns from degs_ggvenn_list.
+
+Removing the ".v2.1" from the gene names because the gene names in the annotation file do not have the ".v2.1" at the end.
+
+Remove the ".v2.1" suffix from the gene_id column in both de_results_list and degs_unique_list:
+```{r diff_genes2}
+# Function to remove ".v2.1" from gene_id column in a list of data frames
+remove_version_suffix <- function(de_list) {
+  lapply(de_list, function(df) {
+    df$gene_id <- gsub("\\.v2\\.1$", "", df$gene_id)  # Remove ".v2.1" from gene_id column
+    return(df)
+  })
+}
+
+# Apply the function to de_results_list
+de_results_list <- remove_version_suffix(de_results_list)
+
+# Apply the function to degs_unique_list
+degs_unique_list <- remove_version_suffix(degs_unique_list)
+
+# Check the result
+head(de_results_list[[1]])
+head(degs_unique_list[[1]])
+
+```
+
+
+## Create separate lists for upregulated and downregulated genes
+
+```{r updown}
+# Initialize lists for upregulated and downregulated genes
+de_upregulated_list <- list()
+de_downregulated_list <- list()
+
+# Loop through each contrast in de_results_list
+for (contrast_name in names(de_results_list)) {
+  dataset <- de_results_list[[contrast_name]]
+  
+  # Ensure log2FoldChange is numeric
+  dataset$log2FoldChange <- as.numeric(dataset$log2FoldChange)
+  
+  # Filter upregulated genes (positive log2FC)
+  upregulated_genes <- subset(dataset, log2FoldChange > 0)
+  
+  # Filter downregulated genes (negative log2FC)
+  downregulated_genes <- subset(dataset, log2FoldChange < 0)
+  
+  # Save results in respective lists
+  de_upregulated_list[[contrast_name]] <- upregulated_genes
+  de_downregulated_list[[contrast_name]] <- downregulated_genes
+  
+  # Print summary
+  cat("Processed:", contrast_name, "\n",
+      "Upregulated:", nrow(upregulated_genes), "genes\n",
+      "Downregulated:", nrow(downregulated_genes), "genes\n\n")
+}
+
+# Save results as RData for later use
+save(de_upregulated_list, file = "2.FunctionalAnalysis/output/de_upregulated_genes.RData")
+save(de_downregulated_list, file = "2.FunctionalAnalysis/output/de_downregulated_genes.RData")
+load("2.FunctionalAnalysis/output/de_upregulated_genes.RData")
+load("2.FunctionalAnalysis/output/de_downregulated_genes.RData")
+```
+
+
+These are the log fold changes for each comparison, to use later in Category Network plots, and sorting the genes in decreasing order of log fold change (required for clusterProfiler).
+
+```{r log_folds}
+# Function to extract, name, remove NAs, and sort log2 fold changes
+extract_lfc_sorted <- function(de_list) {
+  lfc_list <- lapply(de_list, function(df) {
+    lfc <- df$log2FoldChange  # Extract log2 fold change
+    names(lfc) <- df$gene_id  # Name the vector using gene IDs
+    lfc <- na.omit(lfc)  # Remove NA values
+    lfc <- sort(lfc, decreasing = TRUE)  # Sort in decreasing order
+    return(lfc)
+  })
+  return(lfc_list)
+}
+
+# Extract log2 fold changes from de_results_list
+lfc_de_results_list <- extract_lfc_sorted(de_results_list)
+lfc_de_upregulated_list <- extract_lfc_sorted(de_upregulated_list)
+lfc_de_downregulated_list <- extract_lfc_sorted(de_downregulated_list)
+
+# Extract log2 fold changes from degs_unique_list
+lfc_degs_unique_list <- extract_lfc_sorted(degs_unique_list)
+lfc_degs_unique_list_pos <- extract_lfc_sorted(degs_unique_list_pos)
+
+
+# Check results
+head(lfc_de_results_list[[1]])
+head(lfc_degs_unique_list[[1]])
+```
+
+
+### Gene Ontology ORA analysis using clusterProfiler
+This step is meant to retrieve the correspondence between organism-specific gene identifiers and GO terms which are used by clusterProfiler.
+
+```{r biomart}
+#If biomart refuses to query Ensembl again, run this command:
+
+biomaRt::biomartCacheClear() # to solve a known bug https://github.com/BioinformaticsFMRP/TCGAbiolinks/issues/335
+#This will clean the cache memory and allow to perform the Ensembl query again.
+```
+
+### Fold changes for each dataset (positive, above 75th percentile, negative, and below 25th percentile)
+
+Loop through all datasets of differentially expressed genes. For each dataset, create a list of genes with positive fold changes, fold changes above the 75th percentile, negative fold changes, and fold changes below the 25th percentile. Write each list of genes to a file.
+
+This code assigns each filtered dataset (positive, above 75th percentile, negative, and below 25th percentile) as a separate R object with specific names. 
+
+We converted downregulated values to positive values because our reference is not a control. Instead, we aim to interpret differential expression in terms of upregulation in both the target and reference groups.
+
+For example, in the comparison Red Hawk vs. Stampede (Rh vs. St), where Red Hawk is the reference, the interpretation is as follows:
+
+Positive log₂FoldChange values indicate genes upregulated in Stampede relative to Red Hawk.
+Negative log₂FoldChange values (converted to positive) indicate genes upregulated in Red Hawk relative to Stampede.
+By transforming negative fold changes into positive values, we enable a uniform interpretation of upregulated genes across both groups, facilitating biological insights into differential gene expression patterns.
+
+```{r dedatasets}
+# Function to filter log2 fold changes above the 75th percentile (upregulated) 
+# and below the 25th percentile (downregulated, converted to positive values)
+filter_lfc_thresholds <- function(lfc_list, output_dir, dataset_name_prefix) {
+  # Ensure the output directory exists
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+  # Initialize lists to store filtered genes
+  upregulated_list <- list()
+  downregulated_list <- list()
+
+  for (contrast_name in names(lfc_list)) {
+    lfc_vector <- lfc_list[[contrast_name]]
+    
+    # Compute the 75th and 25th percentile cutoffs
+    q_75 <- quantile(lfc_vector, 0.75, na.rm = TRUE)
+    q_25 <- quantile(lfc_vector, 0.25, na.rm = TRUE)
+    
+    # Extract upregulated genes (above 75th percentile)
+    upregulated_genes <- names(lfc_vector[lfc_vector > q_75])
+    upregulated_list[[contrast_name]] <- upregulated_genes
+    
+    # Save upregulated genes to file
+    write.table(upregulated_genes, 
+                file = paste0(output_dir, "/", dataset_name_prefix, "_upregulated_", contrast_name, ".tsv"),
+                row.names = FALSE, col.names = FALSE, quote = FALSE)
+    
+    # Extract downregulated genes (below 25th percentile, and convert to positive values)
+    downregulated_genes <- names(lfc_vector[lfc_vector < q_25])
+    downregulated_values <- abs(lfc_vector[lfc_vector < q_25])  # Convert to positive values
+    downregulated_list[[contrast_name]] <- downregulated_genes
+    
+    # Save downregulated genes to file
+    write.table(downregulated_genes, 
+                file = paste0(output_dir, "/", dataset_name_prefix, "_downregulated_", contrast_name, ".tsv"),
+                row.names = FALSE, col.names = FALSE, quote = FALSE)
+  }
+  
+  return(list(upregulated = upregulated_list, downregulated = downregulated_list))
+}
+
+# Define output directories
+output_dir_results <- "2.FunctionalAnalysis/output/lfc_de_results"
+output_dir_unique <- "2.FunctionalAnalysis/output/lfc_degs_unique"
+
+# Apply function to both lfc_de_results_list and lfc_degs_unique_list
+lfc_results_filtered <- filter_lfc_thresholds(lfc_de_results_list, output_dir_results, "de_results")
+lfc_unique_filtered <- filter_lfc_thresholds(lfc_degs_unique_list, output_dir_unique, "degs_unique")
+
+# Check the results 
+head(lfc_results_filtered$upregulated[[1]])
+head(lfc_results_filtered$downregulated[[1]])
+names(lfc_results_filtered$upregulated)
+names(lfc_results_filtered$downregulated)
+str(lfc_results_filtered)
+str(lfc_unique_filtered)
+```
+
+## Convert All Log₂ Fold Changes to Absolute Values
+```{r}
+# Function to convert all log2FoldChange values to positive
+convert_to_positive <- function(de_list) {
+  de_list_converted <- lapply(de_list, function(df) {
+    if (!"log2FoldChange" %in% colnames(df)) {
+      return(df)  # Skip if no log2FoldChange column
+    }
+    # Convert all log2 fold changes to absolute values (positive)
+    df$log2FoldChange <- abs(df$log2FoldChange)
+    
+    return(df)
+  })
+  return(de_list_converted)
+}
+
+# Apply the function to both lists
+de_downregulated_list_pos <- convert_to_positive(de_downregulated_list)
+degs_unique_list_pos <- convert_to_positive(degs_unique_list)
+
+de_results_list_pos <- convert_to_positive(de_results_list) #this is converting together up and downregulated genes, so log2FoldChange can be used but de_resuls_list is not used in the following steps
+
+#lfc postive for each datasets
+lfc_de_downregulated_list_pos <- extract_lfc_sorted(de_downregulated_list_pos)  
+lfc_de_results_list_pos <- extract_lfc_sorted(de_results_list_pos)
+
+# Print structure to verify
+
+str(degs_unique_list_pos)
+
+names(degs_unique_list_pos)
+
+head(degs_unique_list_pos[[1]])
+head(degs_unique_list_pos[[2]])
+
+
+# Save the lists for future use in the specified directory
+saveRDS(de_downregulated_list_pos, file = "2.FunctionalAnalysis/output/de_downregulated_list_pos.rds")
+saveRDS(degs_unique_list_pos, file = "2.FunctionalAnalysis/output/degs_unique_list_pos.rds")
+# Load the object load()
+de_downregulated_list_pos <- readRDS("2.FunctionalAnalysis/output/de_downregulated_list_pos.rds")
+degs_unique_list_pos <- readRDS("2.FunctionalAnalysis/output/degs_unique_list_pos.rds")
+
+# Check if it loaded correctly
+str(lfc_upregulated_list)  # View structure
+head(lfc_upregulated_list[[1]])  # View first few rows
+
+```
+
+Create subsets of both de_results_list_pos and degs_unique_list_pos that include only those genes with a log₂ fold change above the 75th percentile for each contrast:
+
+```{r}
+# Function to subset genes with log2FoldChange above the 75th percentile
+filter_above_75 <- function(de_list) {
+  lapply(de_list, function(df) {
+    # Calculate the 75th percentile cutoff for log2FoldChange
+    cutoff <- quantile(df$log2FoldChange, 0.75, na.rm = TRUE)
+    # Subset the data frame to keep only genes above the cutoff
+    df_subset <- df[df$log2FoldChange > cutoff, ]
+    return(df_subset)
+  })
+}
+
+#Define a function to filter by abs(log2FoldChange) > 2
+# Function to subset genes with absolute log2FC > 2
+filter_abs_lfc_gt2 <- function(de_list) {
+  lapply(de_list, function(df) {
+    df_subset <- df[abs(df$log2FoldChange) > 2, ]
+    return(df_subset)
+  })
+}
+
+# Apply the functions to both lists
+de_upregulated_list_75 <- filter_above_75(de_upregulated_list)
+de_downregulated_list_75 <- filter_above_75(de_downregulated_list_pos)
+degs_unique_list_75 <- filter_above_75(degs_unique_list_pos)
+
+de_upregulated_list_lfc2 <- filter_abs_lfc_gt2(de_upregulated_list)
+de_downregulated_list_lfc2 <- filter_abs_lfc_gt2(de_downregulated_list_pos)
+degs_unique_list_lfc2 <- filter_abs_lfc_gt2(degs_unique_list_pos)
+
+# Check the structure of the new subsets
+str(de_upregulated_list_75)
+str(de_downregulated_list_75)
+str(degs_unique_list_75)
+
+names(de_upregulated_list_75)
+names(de_downregulated_list_75)
+names(degs_unique_list_75)
+
+head(de_upregulated_list_75[[1]])
+head(de_downregulated_list_75[[1]])
+head(degs_unique_list_75[[1]])
+
+# Save the results for future use
+saveRDS(de_upregulated_list_75, file = "2.FunctionalAnalysis/output/de_upregulated_list_75.rds")
+saveRDS(de_downregulated_list_75, file = "2.FunctionalAnalysis/output/de_downregulated_list_75.rds")
+saveRDS(degs_unique_list_75, file = "2.FunctionalAnalysis/output/degs_unique_list_75.rds")
+
+# Save lfc > 2 lists
+saveRDS(de_upregulated_list_lfc2, file = "2.FunctionalAnalysis/output/de_upregulated_list_lfc2.rds")
+saveRDS(de_downregulated_list_lfc2, file = "2.FunctionalAnalysis/output/de_downregulated_list_lfc2.rds")
+saveRDS(degs_unique_list_lfc2, file = "2.FunctionalAnalysis/output/degs_unique_list_lfc2.rds")
+
+#load rds
+de_upregulated_list_75 <- readRDS("2.FunctionalAnalysis/output/de_upregulated_list_75.rds")
+de_downregulated_list_75 <- readRDS("2.FunctionalAnalysis/output/de_downregulated_list_75.rds")
+degs_unique_list_75 <- readRDS("2.FunctionalAnalysis/output/degs_unique_list_75.rds")
+
+#save image until here
+#save.image("2.FunctionalAnalysis/3_Functional_Analysis.RData")
+```
+
+
+### Annotating DE genes
+
+### Accesing Phytozome database with biomart
+See biomart vignette: https://www.bioconductor.org/packages/devel/bioc/vignettes/biomaRt/inst/doc/accessing_other_marts.html
+
+Version 13 of Phytozome can be found at https://phytozome-next.jgi.doe.gov/ and if you wish to query that version the URL used to create the Mart object must reflect that.
+
+```{r phyto}
+# Create a biomaRt object for Phaseolus vulgaris version 2.1
+phytozome_v13 <- useMart(biomart = "phytozome_mart", 
+                dataset = "phytozome", 
+                host = "https://phytozome-next.jgi.doe.gov")
+
+#list the available datasets
+mysets <- listDatasets(phytozome_v13)
+mysets
+mydataset <- mysets$dataset[mysets$dataset == "phytozome"]
+mydataset
+
+myusemart <- useDataset(as.character(mydataset), mart = phytozome_v13)
+
+allattributes <- listAttributes(mart = myusemart)
+
+allattributes
+```
+
+Once this is set up the usual biomaRt functions can be used to interrogate the database options and run queries.
+
+
+### All expressed genes in the Pv genome found in the salmon counts file
+
+The expressed genes in our data (salmon file) are used as the background genes, the "universe"
+
+```{r allgenes}
+#Save counts to a txt
+head(txi.salmon$counts)
+write.table(txi.salmon$counts, file = "output/counts.txt", sep = "\t", quote = FALSE, row.names = TRUE, col.names = TRUE)
+```
+
+```{r}
+# Extract raw counts
+raw_counts <- counts(dds_roots, normalized=FALSE)
+head(raw_counts)
+str(raw_counts)
+summary(raw_counts)
+
+# Define threshold: expressed if count > 10
+expressed_genes <- raw_counts > 10  
+head(expressed_genes)
+
+
+# building the universe!
+all_pv_genes <- read.delim("output/counts.txt", header = T, stringsAsFactors = F) # directly selects the gene column
+
+starsalmon_counts_sumexp
+head(starsalmon_counts_sumexp)
+str(starsalmon_counts_sumexp)
+rownames(starsalmon_counts_sumexp)
+
+#Filter starsalmon_counts_sumexp to counts > 10 (expressed genes) keeping the format as in the original file
+
+# Filter genes where at least one sample has a count > 10
+filtered_starsalmon_counts <- starsalmon_counts_sumexp[rowSums(starsalmon_counts_sumexp > 10) > 0, ]
+
+# Check the structure of the filtered data
+str(filtered_starsalmon_counts)
+
+# View the first few rows
+head(filtered_starsalmon_counts)
+summary(filtered_starsalmon_counts) 
+
+
+all_pv_genes <- as.character(rownames(filtered_starsalmon_counts)) # converts to character
+#Remove the .v2.1 from the gene names
+all_pv_genes <- gsub("\\.v2.1", "", all_pv_genes)
+
+# we want the correspondence of gene names with GO ids and GO descriptions
+attributes_to_retrieve = c("organism_name", "gene_name1", "gene_description", "go_id", "go_desc",
+                          "kegg_id", "kegg_desc", "pathway_id", "pathway_desc",
+                          "pfam_id", "pfam_desc", "interpro_id", "interpro_desc")
+
+
+library(BiocManager)
+install("BiocFileCache")
+library(BiocFileCache)
+library(biomaRt)
+
+
+# Query the Phytozome database
+all_pv_genes_ann <- getBM(attributes = c("organism_name", "gene_name1","go_id", "go_desc", "kegg_id", "kegg_desc"), 
+      filters = "gene_name_filter", 
+      values = all_pv_genes,  
+      mart = phytozome_v13)
+head(all_pv_genes_ann)
+
+all_pv_genes_ann_gokeggpath <- getBM(attributes = attributes_to_retrieve, 
+      filters = "gene_name_filter", 
+      values = all_pv_genes,  
+      mart = phytozome_v13)
+head(all_pv_genes_ann_gokeggpath, 20)
+
+# Save the gene annotations to a file
+write.table(all_pv_genes_ann, file = "2.FunctionalAnalysis/output/all_pv_genes_ann.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(all_pv_genes_ann_gokeggpath, file = "2.FunctionalAnalysis/output/all_pv_genes_ann_gokeggpath.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+## GO id to GO ontology
+Since we have go_id, we can map ontology (BP, MF, CC) using GO.db
+add the ontology column to all_pv_genes_ann, and can split it for enricher()
+```{r}
+# Install GO.db if you don't have it
+#if (!requireNamespace("GO.db", quietly = TRUE)) {
+#    BiocManager::install("GO.db")
+#}
+
+library(GO.db)
+library(dplyr)
+
+# Step 1: Get unique non-empty GO IDs from the full table
+go_ids_to_map <- all_pv_genes_ann %>%
+  filter(go_id != "") %>%
+  pull(go_id) %>%
+  unique()
+
+# Step 2: Map only those GO IDs to ontology
+go_ontology_map <- AnnotationDbi::select(GO.db,
+                                         keys = go_ids_to_map,
+                                         columns = c("ONTOLOGY"),
+                                         keytype = "GOID")
+
+# Step 3: Merge ontology info back into *full* annotation table
+all_pv_genes_ann_ontology <- all_pv_genes_ann %>%
+  left_join(go_ontology_map, by = c("go_id" = "GOID"))
+
+# See the new dataframe
+head(all_pv_genes_ann_ontology)
+dim(all_pv_genes_ann_ontology)
+dim(all_pv_genes_ann)
+
+write.table(all_pv_genes_ann_ontology, file = "2.FunctionalAnalysis/output/all_pv_genes_ann_ontology.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+#Check ontology with a gene 
+library(dplyr)
+
+# Filter for the gene of interest
+gene_of_interest <- "Phvul.011G198300"
+
+# Show all rows for that gene
+all_pv_genes_ann_ontology %>%
+  filter(gene_name1 == gene_of_interest)
+
+```
+
+
+
+### Retrieving GO annotations for the differentially expressed genes for each contrast
+Getting the annotation for the differentially expressed genes for each contrast.
+We are retrieving the organism name, gene name, gene id, go id, and go description.
+
+
+### Using DE genes separately (upregulated, upregulated top 75th percentile, downregulated (converted to positive), and downregulated (converted to positive) top 75th percentile)
+
+For each contrast (dataset), we have:
+- upregulated genes
+- upregulated genes above the 75th percentile
+- downregulated genes (converted to positive values)
+- downregulated genes above the 75th percentile
+
+The interpreation is as follows: 
+- Positive log₂FoldChange values indicate genes upregulated in the target group relative to the reference group.
+- Negative log₂FoldChange values (converted to positive (absolute)) indicate genes upregulated in the reference group relative to the target group.
+
+Contrast names and reference and target groups are specified in contrasts_df (the original file in: (contrasts_df <- read.csv("Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/contrast/contrasts_pairwise_TissueDayGenotype_Rep_onlyroots.csv")
+)).
+
+Annotating genes in each contrast within de_results_list_pos, degs_unique_list_pos, de_results_list_75, and degs_unique_list_75. It follows these steps:
+
+- Query and store full annotations with all relevant attributes.
+- Save the full annotation dataset for future flexibility.
+- Extract GO/KEGG annotations separately for functional enrichment analysis.
+
+Separately processes and annotates genes for each of the lists:
+
+- de_upregulated_list
+- de_downregulated_list
+- de_upregulated_list_75
+- de_downregulated_list_75
+- degs_unique_list_pos
+- degs_unique_list_75
+
+# Annotate only de_results_list_75[[2]] using both full and GO/KEGG-only attributes:
+```{r}
+# Load required libraries
+library(biomaRt)
+library(dplyr)
+
+# Define annotation attributes
+attributes_full <- c("organism_name", "gene_name1", "gene_description", 
+                     "go_id", "go_desc", "kegg_id", "kegg_desc", 
+                     "pathway_id", "pathway_desc", 
+                     "pfam_id", "pfam_desc", 
+                     "interpro_id", "interpro_desc")
+
+attributes_go_kegg <- c("organism_name", "gene_name1", "gene_description", "gene_id", 
+                        "go_id", "go_desc", "kegg_id", "kegg_desc")
+
+attributes_go_kegg_path <- c("organism_name", "gene_name1", "gene_description", "gene_id", 
+                            "go_id", "go_desc", "kegg_id", "kegg_desc", "pathway_desc")
+
+# Extract the second contrast from de_results_list_75
+contrast_name <- names(de_results_list_75)[2]
+dataset <- de_results_list_75[[2]]
+
+# Ensure there are genes to annotate
+if (nrow(dataset) > 0) {
+  
+  # Full annotation
+  annotated_full <- getBM(
+    attributes = attributes_full, 
+    filters = "gene_name_filter", 
+    values = dataset$gene_id, 
+    mart = phytozome_v13
+  )
+
+  
+  # Save full annotation
+  saveRDS(annotated_full, paste0("2.FunctionalAnalysis/output/annotated_", contrast_name, "_full.rds"))
+  
+  # GO & KEGG annotation
+  annotated_go_kegg <- getBM(
+    attributes = attributes_go_kegg, 
+    filters = "gene_name_filter", 
+    values = dataset$gene_id, 
+    mart = phytozome_v13
+  )
+  
+  # Merge GO/KEGG annotations with the original dataset
+  annotated_de_results_75_go_kegg <- merge(dataset, annotated_go_kegg, by = "gene_id", all.x = TRUE)
+  
+  # Save GO/KEGG annotation
+  saveRDS(annotated_de_results_75_go_kegg, paste0("2.FunctionalAnalysis/output/annotated_", contrast_name, "_go_kegg.rds"))
+
+  # Print completion message
+  print(paste("Annotation completed for contrast:", contrast_name))
+  
+} else {
+  print(paste("No genes to annotate for contrast:", contrast_name))
+}
+```
+
+Loop through each dataset, retrieve annotations using the specified filters and mart, and store the results in separate lists.
+
+- de_upregulated_list
+- de_downregulated_list
+- de_upregulated_list_75
+- de_downregulated_list_75
+- degs_unique_list_pos
+- degs_unique_list_75
+- de_upregulated_list_lfc2
+- de_downregulated_list_lfc2
+- degs_unique_list_lfc2
+
+
+
+# DEGs annotation only go
+```{r}
+attributes_go <- c("organism_name", "gene_name1", "gene_id", "go_id", "go_desc")
+
+# Initialize empty lists to store annotated data
+annotated_degs_unique <- list()
+annotated_de_results_75 <- list()
+annotated_de_results_pos <- list()
+annotated_de_upregulated <- list()
+annotated_de_downregulated <- list()
+annotated_de_upregulated_75 <- list()
+annotated_de_downregulated_75 <- list()
+# Initialize empty lists for log2 fold changes
+annotated_degs_unique_lfc2 <- list()
+annotated_de_upregulated_lfc2 <- list()
+annotated_de_downregulated_lfc2 <- list()
+
+
+# Function to annotate a dataset
+annotate_genes <- function(gene_ids) {
+  if (length(gene_ids) > 0) {
+    # Retrieve gene annotations from Phytozome
+    gene_annotations <- getBM(
+      attributes = attributes_go,
+      filters = "gene_name_filter",  # Use the specified filter
+      values = gene_ids,
+      mart = phytozome_v13  # Use the specified mart
+    )
+    return(gene_annotations)
+  } else {
+    message("No genes to annotate in this dataset.")
+    return(NULL)
+  }
+}
+
+# List of datasets to annotate
+datasets_to_annotate <- list(
+  "degs_unique_list_pos" = degs_unique_list_pos,
+  "degs_unique_list_75" = degs_unique_list_75,
+  "de_upregulated_list" = de_upregulated_list,
+  "de_downregulated_list" = de_downregulated_list,
+  "de_upregulated_list_75" = de_upregulated_list_75,
+  "de_downregulated_list_75" = de_downregulated_list_75,
+  "degs_unique_list_lfc2" = degs_unique_list_lfc2,  # NEW
+  "de_upregulated_list_lfc2" = de_upregulated_list_lfc2,  # NEW
+  "de_downregulated_list_lfc2" = de_downregulated_list_lfc2   # NEW 
+)
+
+# Corresponding lists to store annotations
+annotated_lists <- list(
+  "degs_unique_list_pos" = annotated_degs_unique,
+  "degs_unique_list_75" = annotated_de_results_75,
+  "de_upregulated_list" = annotated_de_upregulated,
+  "de_downregulated_list" = annotated_de_downregulated,
+  "de_upregulated_list_75" = annotated_de_upregulated_75,
+  "de_downregulated_list_75" = annotated_de_downregulated_75,
+  "degs_unique_list_lfc2" = annotated_degs_unique_lfc2,  # NEW
+  "de_upregulated_list_lfc2" = annotated_de_upregulated_lfc2,  # NEW
+  "de_downregulated_list_lfc2" = annotated_de_downregulated_lfc2   # NEW
+)
+
+# Loop through each dataset and annotate
+for (dataset_name in names(datasets_to_annotate)) {
+  dataset <- datasets_to_annotate[[dataset_name]]
+  annotated_list <- list()  # Temporary storage for each dataset
+  
+  for (contrast_name in names(dataset)) {
+    gene_ids <- as.character(dataset[[contrast_name]]$gene_id)
+    annotated_list[[contrast_name]] <- annotate_genes(gene_ids)
+    message("Annotation completed for: ", dataset_name, " -> ", contrast_name)
+  }
+  
+  # Store annotated data in the corresponding list
+  annotated_lists[[dataset_name]] <- annotated_list
+}
+
+# Save results
+save(annotated_lists, file = "2.FunctionalAnalysis/output/annotated_gene_lists_lfc2.RData")
+load("2.FunctionalAnalysis/output/annotated_gene_lists_lfc2.RData")
+
+head(annotated_lists[[2]][[1]])
+head(annotated_lists[[4]][[1]])
+```
+
+
+# DEGs annotation go, kegg and pathway
+```{r}
+attributes_go_kegg_path <- c("organism_name", "gene_name1", "gene_description", "gene_id", 
+                            "go_id", "go_desc", "kegg_id", "kegg_desc", "pathway_desc")
+
+# Initialize empty lists to store annotated data
+annotated_degs_unique <- list()
+annotated_de_results_75 <- list()
+annotated_de_results_pos <- list()
+annotated_de_upregulated <- list()
+annotated_de_downregulated <- list()
+annotated_de_upregulated_75 <- list()
+annotated_de_downregulated_75 <- list()
+# Initialize empty lists for log2 fold changes
+annotated_degs_unique_lfc2 <- list()
+annotated_de_upregulated_lfc2 <- list()
+annotated_de_downregulated_lfc2 <- list()
+
+# Function to annotate a dataset
+annotate_genes <- function(gene_ids) {
+  if (length(gene_ids) > 0) {
+    # Retrieve gene annotations from Phytozome
+    gene_annotations <- getBM(
+      attributes = attributes_go_kegg_path,
+      filters = "gene_name_filter",  # Use the specified filter
+      values = gene_ids,
+      mart = phytozome_v13  # Use the specified mart
+    )
+    return(gene_annotations)
+  } else {
+    message("No genes to annotate in this dataset.")
+    return(NULL)
+  }
+}
+
+# List of datasets to annotate
+datasets_to_annotate <- list(
+  "degs_unique_list_pos" = degs_unique_list_pos,
+  "degs_unique_list_75" = degs_unique_list_75,
+  "de_upregulated_list" = de_upregulated_list,
+  "de_downregulated_list" = de_downregulated_list,
+  "de_upregulated_list_75" = de_upregulated_list_75,
+  "de_downregulated_list_75" = de_downregulated_list_75,
+  "degs_unique_list_lfc2" = degs_unique_list_lfc2,  # NEW
+  "de_upregulated_list_lfc2" = de_upregulated_list_lfc2,  # NEW
+  "de_downregulated_list_lfc2" = de_downregulated_list_lfc2   # NEW 
+)
+
+# Corresponding lists to store annotations
+annotated_lists_gokeggpath <- list(
+  "degs_unique_list_pos" = annotated_degs_unique,
+  "degs_unique_list_75" = annotated_de_results_75,
+  "de_upregulated_list" = annotated_de_upregulated,
+  "de_downregulated_list" = annotated_de_downregulated,
+  "de_upregulated_list_75" = annotated_de_upregulated_75,
+  "de_downregulated_list_75" = annotated_de_downregulated_75,
+  "degs_unique_list_lfc2" = annotated_degs_unique_lfc2,  # NEW
+  "de_upregulated_list_lfc2" = annotated_de_upregulated_lfc2,  # NEW
+  "de_downregulated_list_lfc2" = annotated_de_downregulated_lfc2   # NEW
+)
+
+# Loop through each dataset and annotate
+for (dataset_name in names(datasets_to_annotate)) {
+  dataset <- datasets_to_annotate[[dataset_name]]
+  annotated_list <- list()  # Temporary storage for each dataset
+  
+  for (contrast_name in names(dataset)) {
+    gene_ids <- as.character(dataset[[contrast_name]]$gene_id)
+    annotated_list[[contrast_name]] <- annotate_genes(gene_ids)
+    message("Annotation completed for: ", dataset_name, " -> ", contrast_name)
+  }
+  
+  # Store annotated data in the corresponding list
+  annotated_lists_gokeggpath[[dataset_name]] <- annotated_list
+}
+
+# Save results
+save(annotated_lists_gokeggpath, file = "2.FunctionalAnalysis/output/annotated_gene_lists_gokeggpath_lfc2.RData")
+load("2.FunctionalAnalysis/output/annotated_gene_lists_gokeggpath_lfc2.RData")
+
+head(annotated_lists_gokeggpath[[2]][[1]])
+head(annotated_lists_gokeggpath[[4]][[1]])
+```
+
+
+### Gene Ontology ORA analysis using clusterProfiler
+I need to use the "enricher" functions instead of the "enrichGO" function because I have a list of genes and go terms already from phytozome.
+```{r oravignette}
+#browseVignettes("clusterProfiler")
+```
+
+### ORA analysis for Gene Ontology all genes 
+
+```{r}
+# Load required packages
+library(clusterProfiler)
+library(dplyr)
+library(ggplot2)
+library(enrichplot)
+library(ggupset)
+
+# Convert gene IDs in the universe to characters
+all_pv_genes_ann$gene_name1 <- as.character(all_pv_genes_ann$gene_name1)
+
+# Extract the second contrast from de_results_list_75
+test_genes_ann <- diff_AUZTaproot_day2_RedHawk_vs_Stampede_genes_ann##this was combining up and downregulated genes
+test_genes_ann <- diff_Day2_Downregulated_venn_intersections_2_genes_ann
+str(diff_Day2_Downregulated_venn_intersections_2_genes_ann)
+test_genes_ann <- diff_Day5_Downregulated_venn_intersections_1_genes_ann
+
+test_genes_ann <- as.data.frame(annotated_degs_unique[[5]])#"Day2_Upregulated_venn_intersections_2"
+test_genes_ann <- as.data.frame(annotated_degs_unique[[15]])
+
+names(annotated_degs_unique)
+names(annotated_degs_unique[7])
+names(annotated_degs_unique[15])
+head(annotated_degs_unique[5])
+
+names(annotated_lists[[5]][[2]])
+names(annotated_lists[[6]][[2]])
+# Check column names
+head(test_genes_ann)
+head(test_genes_ann[, c("go_id", "gene_name1")])
+
+
+# Ensure the correct columns exist
+head(dplyr::select(test_genes_ann, gene_name1, go_id))
+```
+
+
+## Uniquely upregulated in AUZTaproot day2: RedHawk and Stampede
+No enrichments found in unique genes AUZT
+
+```{r}
+names(annotated_lists)
+names(annotated_lists[[1]])#[1] "degs_unique_list_pos"  
+names(annotated_lists[[1]][[2]])#Upreg in Red Hawk AUZT uniquely: [2] "Day2_Downregulated_venn_intersections_2"  #intersections_2:AUZTaproot_day2_RedHawk_vs_Stampede
+names(annotated_lists[[1]][[5]])#Upreg in Stampede AUZT uniquely:[5] "Day2_Upregulated_venn_intersections_2"   #intersections_2:AUZTaproot_day2_RedHawk_vs_Stampede
+
+
+
+UniqAUZTd2UpRh_genes_ann <- as.data.frame(annotated_lists[[1]][[2]])#UpregRh: [1] "degs_unique_list_pos" [2] "Day2_Downregulated_venn_intersections_2"  #intersections_2:AUZTaproot_day2_RedHawk_vs_Stampede
+UniqAUZTd2UpSt_genes_ann <- as.data.frame(annotated_lists[[1]][[5]])#UpregSt: [1] "degs_unique_list_pos" [5] "Day2_Upregulated_venn_intersections_2"   #intersections_2:AUZTaproot_day2_RedHawk_vs_Stampede
+head(UniqAUZTd2UpRh_genes_ann) 
+unique(UniqAUZTd2UpRh_genes_ann$gene_name1) #310 genes, confirms I'm using the right dataset
+head(UniqAUZTd2UpSt_genes_ann) 
+unique(UniqAUZTd2UpSt_genes_ann$gene_name1) #180 genes
+
+# Perform ORA for Gene Ontology using enricher()
+ora_UniqAUZTd2UpRh <- enricher(
+  gene = UniqAUZTd2UpRh_genes_ann$gene_name1, 
+  universe = all_pv_genes_ann$gene_name1, 
+  TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1
+)
+
+ora_UniqAUZTd2UpSt <- enricher(
+  gene = UniqAUZTd2UpSt_genes_ann$gene_name1, 
+  universe = all_pv_genes_ann$gene_name1, 
+  TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1
+)
+
+# Display ORA results
+head(ora_UniqAUZTd2UpRh)
+head(ora_UniqAUZTd2UpSt)
+# No enrichments found in unique genes AUZT
+
+```
+
+
+## Uniquely upregulated in Hypocotyl day5: RedHawk and Stampede
+```{r}
+names(annotated_lists)
+names(annotated_lists[[1]])#[1] "degs_unique_list_pos"
+names(annotated_lists[[1]][[7]])#Upreg in Red Hawk HYP uniquely: [7] "Day5_Downregulated_venn_intersections_1"  #intersections_1:1	Hypocotyl_day5_RedHawk_vs_Stampede
+names(annotated_lists[[1]][[15]])#Upreg in Stampede HYP uniquely:[15] "Day5_Upregulated_venn_intersections_1"   #intersections_1:1	Hypocotyl_day5_RedHawk_vs_Stampede
+
+UniqHYPd5UpRh_genes_ann <- as.data.frame(annotated_lists[[1]][[7]])#UpregRh: [1] "degs_unique_list_pos" [7] "Day5_Downregulated_venn_intersections_1"  #intersections_1:1	Hypocotyl_day5_RedHawk_vs_Stampede
+UniqHYPd5UpSt_genes_ann <- as.data.frame(annotated_lists[[1]][[15]])#UpregSt: [1] "degs_unique_list_pos" [15] "Day5_Upregulated_venn_intersections_1"   #intersections_1:1	Hypocotyl_day5_RedHawk_vs_Stampede
+
+head(UniqHYPd5UpRh_genes_ann)
+unique(UniqHYPd5UpRh_genes_ann$gene_name1) #510 genes, confirms I'm using the right dataset
+head(UniqHYPd5UpSt_genes_ann)
+unique(UniqHYPd5UpSt_genes_ann$gene_name1) #676 genes
+
+# Perform ORA for Gene Ontology using enricher()
+ora_UniqHYPd5UpRh <- enricher(
+  gene = UniqHYPd5UpRh_genes_ann$gene_name1, 
+  universe = all_pv_genes_ann$gene_name1, 
+  TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1
+)
+
+ora_UniqHYPd5UpSt <- enricher(
+  gene = UniqHYPd5UpSt_genes_ann$gene_name1, 
+  universe = all_pv_genes_ann$gene_name1, 
+  TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1
+)
+
+# Display ORA results
+head(ora_UniqHYPd5UpRh)
+head(ora_UniqHYPd5UpSt)
+
+
+# Dotplot visualization
+dotplot_UniqHYPd5UpRh <- dotplot(ora_UniqHYPd5UpRh, color = "qvalue")
+dotplot_UniqHYPd5UpRh
+pdf_file <- paste0("2.FunctionalAnalysis/figures/dotplot_UniqHYPd5UpRh_qv_lg.pdf")
+pdf(pdf_file, width = 7, height = 4)
+print(dotplot_UniqHYPd5UpRh)
+dev.off()
+
+dotplot_UniqHYPd5UpSt <- dotplot(ora_UniqHYPd5UpSt, color = "qvalue")
+dotplot_UniqHYPd5UpSt
+pdf_file <- paste0("2.FunctionalAnalysis/figures/dotplot_UniqHYPd5UpSt_qv_lg.pdf")
+pdf(pdf_file, width = 6, height = 3.5)
+print(dotplot_UniqHYPd5UpSt)
+dev.off()
+
+#Heatmaps
+names(lfc_degs_unique_list_pos)
+heat_UniqHYPd5UpRh <- heatplot(ora_UniqHYPd5UpRh, foldChange = lfc_degs_unique_list_pos[[7]]) +
+  scale_fill_gradient(low="#cedfce", high = "#710b7e")
+heat_UniqHYPd5UpRh
+
+heat_UniqHYPd5UpSt <- heatplot(ora_UniqHYPd5UpSt, foldChange = lfc_degs_unique_list_pos[[15]]) +
+  scale_fill_gradient(low="#cedfce", high = "#710b7e")
+heat_UniqHYPd5UpSt
+
+
+#Ordered as in the dotplot
+#Red Hawk HYP d5
+top_n_terms <- 10
+top_go_terms <- rev(levels(ora_UniqHYPd5UpRh@result$Description)[1:top_n_terms])  # Select the first 5 terms
+top_go_terms <- top_go_terms[c(5, 4, 3, 2, 1)]  # Reverse order for heatmap
+top_go_terms
+
+filtered_ora <- ora_UniqHYPd5UpRh
+filtered_ora@result <- filtered_ora@result %>% filter(Description %in% top_go_terms)
+
+
+# Extract genes for only the top 5 GO terms
+gene_df <- ora_UniqHYPd5UpRh@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Merge with log2 fold change values & sort genes within each GO term by log2FC
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_degs_unique_list_pos[[7]]),
+                       log2FC = lfc_degs_unique_list_pos[[7]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(match(Description, top_go_terms), desc(log2FC))  # Match top 5 GO terms order
+
+# Get final ordered gene list for the selected GO terms
+ordered_gene_list <- unique(gene_df$geneID)
+
+# Filter the fold-change values to include only selected genes
+filtered_lfc <- lfc_degs_unique_list_pos[[7]][ordered_gene_list]
+
+# Generate heatplot with only the top 5 GO terms
+heat_UniqHYPd5UpRh <- heatplot(ora_UniqHYPd5UpRh, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e") +
+  scale_y_discrete(limits = top_go_terms) +  # Show only the top 5 GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_UniqHYPd5UpRh
+
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_UniqHYPd5UpRh_top5_lfcordgenes.pdf", width = 15, height = 5)
+print(heat_UniqHYPd5UpRh)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+
+#Red Hawk HYP d5 ordered by q-value
+
+#Genes ordered by GO term based on q-value or GeneRatio and ordered by log2FC within each GO term
+# Step 1: Order GO terms (y-axis) by q-value (lowest q-value first)
+ora_UniqHYPd5UpRh@result <- ora_UniqHYPd5UpRh@result[order(ora_UniqHYPd5UpRh$qvalue, decreasing = TRUE), ]  # Ensures most significant GO terms appear first
+#by GeneRatio
+ora_UniqHYPd5UpRh@result <- ora_UniqHYPd5UpRh@result[order(ora_UniqHYPd5UpRh$GeneRatio, decreasing = TRUE), ]  # Ensures most significant GO terms appear first
+
+# Ensure GO terms are correctly ordered as a factor
+ora_UniqHYPd5UpRh@result$Description <- factor(ora_UniqHYPd5UpRh@result$Description, levels = ora_UniqHYPd5UpRh@result$Description)
+
+# Step 2: Extract genes from ordered GO terms, ensuring correct order
+gene_df <- ora_UniqHYPd5UpRh@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 3: Merge with log2 fold change values & sort within each GO term
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_degs_unique_list_pos[[7]]),
+                       log2FC = lfc_degs_unique_list_pos[[7]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(Description, desc(log2FC))  # Sort by GO term, then by highest log2FC
+
+# Step 4: Get final ordered gene list (ensuring only `geneID` genes are included)
+ordered_gene_list <- unique(gene_df$geneID)
+
+# Step 5: Filter the fold-change values to include only these genes
+filtered_lfc <- lfc_degs_unique_list_pos[[7]][ordered_gene_list]
+
+# Step 6: Generate heatplot with correctly ordered GO terms and genes
+heat_UniqHYPd5UpRh <- heatplot(ora_UniqHYPd5UpRh, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e") +
+  scale_y_discrete(limits = levels(ora_UniqHYPd5UpRh@result$Description)) +  # Order GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_UniqHYPd5UpRh
+
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_UniqHYPd5UpRh_qv_lfcordgenes.pdf", width = 15, height = 5)
+print(heat_UniqHYPd5UpRh)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+#check min and max of the log2FC values in the list lfc_degs_unique_list_pos
+sapply(lfc_degs_unique_list_pos, function(x) {
+  c(min = min(x, na.rm = TRUE),
+    max = max(x, na.rm = TRUE))
+})
+
+
+#Stampede HYP d5
+
+#Genes ordered by GO term based on q-value or GeneRatio and ordered by log2FC within each GO term
+# Step 1: Order GO terms (y-axis) by q-value (lowest q-value first)
+ora_UniqHYPd5UpSt@result <- ora_UniqHYPd5UpSt@result[order(ora_UniqHYPd5UpSt$qvalue, decreasing = TRUE), ]  # Ensures most significant GO terms appear first
+#by GeneRatio
+ora_UniqHYPd5UpSt@result <- ora_UniqHYPd5UpSt@result[order(ora_UniqHYPd5UpSt$GeneRatio, decreasing = TRUE), ]  # Ensures most significant GO terms appear first
+
+
+# Ensure GO terms are correctly ordered as a factor
+ora_UniqHYPd5UpSt@result$Description <- factor(ora_UniqHYPd5UpSt@result$Description, levels = ora_UniqHYPd5UpSt@result$Description)
+
+# Step 2: Extract genes from ordered GO terms, ensuring correct order
+gene_df <- ora_UniqHYPd5UpSt@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 3: Merge with log2 fold change values & sort within each GO term
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_degs_unique_list_pos[[15]]),
+                       log2FC = lfc_degs_unique_list_pos[[15]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(Description, desc(log2FC))  # Sort by GO term, then by highest log2FC
+
+# Step 4: Get final ordered gene list (ensuring only `geneID` genes are included)
+ordered_gene_list <- unique(gene_df$geneID)  
+
+# Step 5: Filter the fold-change values to include only these genes
+filtered_lfc <- lfc_degs_unique_list_pos[[15]][ordered_gene_list]
+
+# Step 6: Generate heatplot with correctly ordered GO terms and genes
+heat_UniqHYPd5UpSt <- heatplot(ora_UniqHYPd5UpSt, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e") +
+  scale_y_discrete(limits = levels(ora_UniqHYPd5UpSt@result$Description)) +  # Order GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_UniqHYPd5UpSt
+
+
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_UniqHYPd5UpSt_gratio_sm.pdf", width = 7, height = 2.5)
+print(heat_UniqHYPd5UpSt)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+
+## show only the top 9 GO terms in the heatplot while keeping the correct ordering, modify the code to filter the GO terms before plotting
+#Save the plot heat_test as pdf
+library(dplyr)
+library(tidyr)
+
+# Step 1: Select the top 9 GO terms based on existing order in ora_AUZTd2UpRh
+top_n_terms <- 9
+top_go_terms <- rev(levels(ora_AUZTd2UpRh@result$Description)[1:top_n_terms])  # Select the first 5 terms
+#reverse because heatplot shows the first term at the bottom, so we need to reverse the same as in the dotplot
+#ordering as in dotplot 
+top_go_terms <- top_go_terms[c(9, 2, 8, 6, 7, 4, 3, 1, 5)]#this is the order of the dotplot
+top_go_terms <- rev(top_go_terms)
+# Step 2: Filter the GO terms to include only the top 5
+filtered_ora <- ora_AUZTd2UpRh
+filtered_ora@result <- filtered_ora@result %>% filter(Description %in% top_go_terms)
+
+# Step 3: Extract genes for only the top 5 GO terms
+gene_df <- filtered_ora@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 4: Merge with log2 fold change values & sort genes within each GO term by log2FC
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_de_results_list_pos[[2]]),
+                       log2FC = lfc_de_results_list_pos[[2]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(match(Description, top_go_terms), desc(log2FC))  # Match top 5 GO terms order
+
+# Step 5: Get final ordered gene list for the selected GO terms
+ordered_gene_list <- unique(gene_df$geneID)
+
+# Step 6: Filter the fold-change values to include only selected genes
+filtered_lfc <- lfc_de_results_list_pos[[2]][ordered_gene_list]
+
+# Step 7: Generate heatplot with only the top 5 GO terms
+heat_AUZTd2UpRh <- heatplot(filtered_ora, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e") +
+  scale_y_discrete(limits = top_go_terms) +  # Show only the top 5 GO terms
+  scale_x_discrete(limits = ordered_gene_list) + # Order genes within GO term by log2FC
+  coord_equal()  
+
+# Display the heatmap
+heat_AUZTd2UpRh
+
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_Day2AUZUpRh_top9_lfcordgenes.pdf", width = 15, height = 5)  
+print(heat_AUZTd2UpRh)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+```
+
+# AUZT Day 2 Stampede and Red Hawk ORA for Gene Ontology using enricher() 
+
+```{r}
+names(annotated_lists)
+names(annotated_lists[[3]]) #Upregulated in Stampede
+names(annotated_lists[[4]]) #Upregulated in Red Hawk
+AUZTd2UpSt_genes_ann <- as.data.frame(annotated_lists[[3]][[2]])#UpregSt: [3] "de_upregulated_list" [2] "AUZTaproot_day2_RedHawk_vs_Stampede"      
+AUZTd2UpRh_genes_ann <- as.data.frame(annotated_lists[[4]][[2]])#UpregRh: [4] "de_downregulated_list" [2] "AUZTaproot_day2_RedHawk_vs_Stampede"   
+
+head(AUZTd2UpSt_genes_ann)
+head(AUZTd2UpRh_genes_ann)
+
+#Annotated lists with log2FC > 2 before enrichment
+names(annotated_lists[[8]])
+names(annotated_lists[[9]])
+AUZTd2UpSt_genes_ann_lfc2 <- as.data.frame(annotated_lists[[8]][[2]])#UpregSt: [8] ""de_upregulated_list_lfc2"  [2] "AUZTaproot_day2_RedHawk_vs_Stampede"      
+AUZTd2UpRh_genes_ann_lfc2 <- as.data.frame(annotated_lists[[9]][[2]])#UpregRh: [9] "de_downregulated_list_lfc2" [2] "AUZTaproot_day2_RedHawk_vs_Stampede"   
+
+
+
+
+# Performing ORA for Gene Ontology using enricher()
+#Upregulated in Stampede 
+colnames(all_pv_genes_ann)
+colnames(all_pv_genes_ann_ontology)
+
+ora_AUZTd2UpSt <- enricher(
+  gene = AUZTd2UpSt_genes_ann$gene_name1, 
+  universe = all_pv_genes_ann_ontology$gene_name1, 
+  TERM2GENE = all_pv_genes_ann_ontology[, c("go_desc", "gene_name1", "ONTOLOGY")],
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05 #changed from 0.1 to 0.05
+)
+
+#Upregulated in Red Hawk
+ora_AUZTd2UpRh <- enricher(
+  gene = AUZTd2UpRh_genes_ann$gene_name1, 
+  universe = all_pv_genes_ann_ontology$gene_name1, 
+  TERM2GENE = all_pv_genes_ann_ontology[, c("go_desc", "gene_name1", "ONTOLOGY")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+# Display ORA results
+head(ora_AUZTd2UpSt)
+head(ora_AUZTd2UpRh)
+
+#ORA with log2FC > 2
+ora_AUZTd2UpSt_lfc2 <- enricher(
+  gene = AUZTd2UpSt_genes_ann_lfc2$gene_name1, 
+  universe = all_pv_genes_ann_ontology$gene_name1, 
+  TERM2GENE = all_pv_genes_ann_ontology[, c("go_desc", "gene_name1", "ONTOLOGY")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1
+)
+
+ora_AUZTd2UpRh_lfc2 <- enricher(
+  gene = AUZTd2UpRh_genes_ann_lfc2$gene_name1, 
+  universe = all_pv_genes_ann_ontology$gene_name1, 
+  TERM2GENE = all_pv_genes_ann_ontology[, c("go_desc", "gene_name1", "ONTOLOGY")], 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1
+)
+
+# Display ORA results
+head(ora_AUZTd2UpSt_lfc2)
+head(ora_AUZTd2UpRh_lfc2)
+
+# Dotplot visualization
+#Upregulated in Stampede
+dotplot_AUZTd2UpSt <- dotplot(ora_AUZTd2UpSt, color = "qvalue")
+dotplot_AUZTd2UpSt
+pdf_file <- paste0("2.FunctionalAnalysis/figures/dotplot_Day2AUZUpSt_qv_6x3.5.pdf")
+pdf(pdf_file, width = 6, height = 3.5)#height = 5)
+print(dotplot_AUZTd2UpSt)
+dev.off()
+
+#Upregulated in Red Hawk
+dotplot_AUZTd2UpRh <- dotplot(ora_AUZTd2UpRh, color = "qvalue")
+dotplot_AUZTd2UpRh
+pdf_file <- paste0("2.FunctionalAnalysis/figures/dotplot_Day2AUZUpRh_qv_6x3.5.pdf")
+pdf(pdf_file, width = 6, height = 3.5)#height = 5)
+print(dotplot_AUZTd2UpRh)
+dev.off()
+
+# Select the top N GO terms (adjust "N" as needed, e.g., 10)
+top_N <- 4  # Change to the number of GO terms you want to display
+ora_AUZTd2UpRh@result <- ora_AUZTd2UpRh@result[1:top_N, ]  
+
+# Ensure GO terms are treated as ordered factors based on the new selection
+ora_AUZTd2UpRh@result$Description <- factor(ora_AUZTd2UpRh@result$Description, 
+                                            levels = ora_AUZTd2UpRh@result$Description)
+
+# Generate dot plot with ordered terms
+dotplot_AUZTd2UpRh <- dotplot(ora_AUZTd2UpRh, color = "qvalue") +
+  scale_y_discrete(limits = rev(levels(ora_AUZTd2UpRh@result$Description)))  # Ensure correct order
+
+# Display the plot
+dotplot_AUZTd2UpRh
+
+# Save the plot as a PDF file
+pdf_file <- paste0("2.FunctionalAnalysis/figures/dotplot_Day2AUZUpRh_top4_sm.pdf")
+pdf(pdf_file, width = 6.2, height = 2.5)
+print(dotplot_AUZTd2UpRh)
+dev.off()
+
+#Plots with log2FC > 2
+
+#Upregulated in Stampede with log2FC > 2 and qvalue < 0.05
+#ora_AUZTd2UpSt_lfc2@result <- dplyr::filter(ora_AUZTd2UpSt_lfc2@result, qvalue <= 0.05)
+head(ora_AUZTd2UpSt_lfc2@result)
+
+dotplot_AUZTd2UpSt_lfc2 <- dotplot(ora_AUZTd2UpSt_lfc2, color = "qvalue")
+dotplot_AUZTd2UpSt_lfc2
+pdf_file <- paste0("2.FunctionalAnalysis/figures/1_lfcgt2/dotplot_Day2AUZUpSt_lfc2_qv0p05_6x3.5.pdf")
+pdf(pdf_file, width = 6, height = 3.5)#height = 5)
+print(dotplot_AUZTd2UpSt_lfc2)
+dev.off()
+
+#No enrichments found in Red Hawk AUZT with lfc2, q value < 0.05
+
+#Upregulated in Red Hawk lfc2
+dotplot_AUZTd2UpRh_lfc2 <- dotplot(ora_AUZTd2UpRh_lfc2, color = "qvalue")
+dotplot_AUZTd2UpRh_lfc2
+pdf_file <- paste0("2.FunctionalAnalysis/figures/1_lfcgt2/dotplot_Day2AUZUpRh_lfc2_qv0p1_6x3.5.pdf")
+pdf(pdf_file, width = 6, height = 3.5)#height = 5)
+print(dotplot_AUZTd2UpRh_lfc2)
+dev.off()
+```
+
+
+## Heatplots: AUZT Day 2 Stampede and Red Hawk
+```{r}
+library(enrichplot)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+#check min value for lfc_de_results_list_pos
+sapply(lfc_de_results_list_pos, function(x) {
+  c(min = min(x, na.rm = TRUE),
+    max = max(x, na.rm = TRUE))
+})
+
+## Heatplot Stampede
+heat_test <- heatplot(ora_AUZTd2UpSt, foldChange=lfc_de_results_list_pos[[2]])
+
+#Here is the same to use lfc_de_results_list_pos or lfc_de_upregulated_list (this last one is the same but a subset with only upregulated genes)
+#since it finds gens by geneID, it will be the same result
+heat_test <- heatplot(ora_AUZTd2UpSt, foldChange = lfc_de_results_list_pos[[2]]) +
+  scale_fill_gradient(low="#cedfce", high = "#710b7e")
+heat_test
+
+heat_test <- heatplot(ora_AUZTd2UpSt, foldChange = lfc_de_upregulated_list[[2]]) +
+  scale_fill_gradient(low="#cedfce", high = "#710b7e")
+heat_test
+
+
+
+head(ora_AUZTd2UpSt@result)
+#Genes ordered by GO term based on q-value and ordered by log2FC within each GO term
+# Step 1: Order GO terms (y-axis) by q-value (lowest q-value first)
+ora_AUZTd2UpSt@result <- ora_AUZTd2UpSt@result[order(ora_AUZTd2UpSt$qvalue, decreasing = TRUE), ]  # Ensures most significant GO terms appear first
+
+
+# Ensure GO terms are correctly ordered as a factor
+ora_AUZTd2UpSt@result$Description <- factor(ora_AUZTd2UpSt@result$Description, levels = ora_AUZTd2UpSt@result$Description)
+
+# Step 2: Extract genes from ordered GO terms, ensuring correct order
+gene_df <- ora_AUZTd2UpSt@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 3: Merge with log2 fold change values & sort within each GO term
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_de_upregulated_list[[2]]),
+                       log2FC = lfc_de_upregulated_list[[2]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(Description, desc(log2FC))  # Sort by GO term, then by highest log2FC
+
+# Step 4: Get final ordered gene list (ensuring only `geneID` genes are included)
+ordered_gene_list <- unique(gene_df$geneID)  
+
+# Step 5: Filter the fold-change values to include only these genes
+filtered_lfc <- lfc_de_upregulated_list[[2]][ordered_gene_list]
+summary(filtered_lfc) #to use the same scale for coloring log2FC in both St and Rh, so it's comparable
+
+# Step 6: Generate heatplot with correctly ordered GO terms and genes
+heat_AUZTd2UpSt <- heatplot(ora_AUZTd2UpSt, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e") +
+  scale_y_discrete(limits = levels(ora_AUZTd2UpSt@result$Description)) +  # Order GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_AUZTd2UpSt
+
+
+#Save the plot heat_test as pdf
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_Day2AUZUpSt_lg_lfcordgenes.pdf", width = 10, height = 2.5)  
+print(heat_test)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+#Stampede:
+AUZTd2UpStlfc_sum <- summary(filtered_lfc)
+AUZTd2UpStlfc_sum
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 1.023   1.673   2.039   2.576   3.216   6.454 
+
+#Save ordered gene list for Red Hawk
+AUZTd2UpSt_ordgenes <- ordered_gene_list
+#write.csv(AUZTd2UpSt_ordgenes, "2.FunctionalAnalysis/output/AUZTd2UpSt_ordered_genes.csv")
+
+
+#Save filtered_lfc for Stampede 
+#write.csv(filtered_lfc, "2.FunctionalAnalysis/output/filtered_lfc_AUZTd2UpSt.csv")
+
+
+## Heatplot Red Hawk
+heat_test <- heatplot(ora_AUZTd2UpRh, foldChange=lfc_de_results_list_pos[[2]])  
+heat_test <- heatplot(ora_AUZTd2UpRh, foldChange = lfc_de_results_list_pos[[2]]) +
+  scale_fill_gradient(low="#cedfce", high = "#710b7e")
+heat_test
+
+## show only the top 9 GO terms in the heatplot while keeping the correct ordering, modify the code to filter the GO terms before plotting
+#Save the plot heat_test as pdf
+library(dplyr)
+library(tidyr)
+
+# Ensure GO terms are correctly ordered as a factor
+ora_AUZTd2UpRh@result$Description <- factor(ora_AUZTd2UpRh@result$Description, levels = ora_AUZTd2UpRh@result$Description)
+
+# Step 1: Select the top 9 GO terms based on existing order in ora_AUZTd2UpRh
+top_n_terms <- 9
+top_go_terms <- rev(levels(ora_AUZTd2UpRh@result$Description)[1:top_n_terms])  # Select the first 5 terms
+#reverse because heatplot shows the first term at the bottom, so we need to reverse the same as in the dotplot
+#ordering as in dotplot 
+top_go_terms <- top_go_terms[c(9, 2, 8, 6, 7, 4, 3, 1, 5)]#this is the order of the dotplot
+top_go_terms <- rev(top_go_terms)
+# Step 2: Filter the GO terms to include only the top 5
+filtered_ora <- ora_AUZTd2UpRh
+filtered_ora@result <- filtered_ora@result %>% filter(Description %in% top_go_terms)
+
+# Step 3: Extract genes for only the top 5 GO terms
+gene_df <- filtered_ora@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 4: Merge with log2 fold change values & sort genes within each GO term by log2FC
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_de_results_list_pos[[2]]),
+                       log2FC = lfc_de_results_list_pos[[2]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(match(Description, top_go_terms), desc(log2FC))  # Match top 5 GO terms order
+
+# Step 5: Get final ordered gene list for the selected GO terms
+ordered_gene_list <- unique(gene_df$geneID)
+
+# Step 6: Filter the fold-change values to include only selected genes
+filtered_lfc <- lfc_de_results_list_pos[[2]][ordered_gene_list]
+
+# Step 7: Generate heatplot with only the top 5 GO terms
+heat_AUZTd2UpRh <- heatplot(filtered_ora, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e") +
+  scale_y_discrete(limits = top_go_terms) +  # Show only the top 5 GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_AUZTd2UpRh
+
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_Day2AUZUpRh_top9_lfcordgenes.pdf", width = 15, height = 5)  
+print(heat_AUZTd2UpRh)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+
+## Top 3 terms
+head(ora_AUZTd2UpRh@result)
+# Step 1: Select the top 4 GO terms based on existing order in ora_AUZTd2UpRh
+top_n_terms <- 4
+top_go_terms <- rev(levels(ora_AUZTd2UpRh@result$Description)[1:top_n_terms])  # Select the first 3 terms
+#reverse because heatplot shows the first term at the bottom, so we need to reverse the same as in the dotplot
+#ordering as in dotplot 
+top_go_terms <- top_go_terms[c(1, 3, 4)]#this is the order of the dotplot
+#top_go_terms <- rev(top_go_terms)
+# Step 2: Filter the GO terms to include only the top 5
+filtered_ora <- ora_AUZTd2UpRh
+filtered_ora@result <- filtered_ora@result %>% filter(Description %in% top_go_terms)
+
+# Step 3: Extract genes for only the top 5 GO terms
+gene_df <- filtered_ora@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 4: Merge with log2 fold change values & sort genes within each GO term by log2FC
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_de_results_list_pos[[2]]),
+                       log2FC = lfc_de_results_list_pos[[2]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(match(Description, top_go_terms), desc(log2FC))  # Match top 5 GO terms order
+
+# Step 5: Get final ordered gene list for the selected GO terms
+ordered_gene_list <- unique(gene_df$geneID)
+
+# Step 6: Filter the fold-change values to include only selected genes
+filtered_lfc <- lfc_de_results_list_pos[[2]][ordered_gene_list]
+summary(filtered_lfc)
+
+# Step 7: Generate heatplot with only the top 5 GO terms. Added limits to use same scale for coloring log2FC in both St and Rh, so it's comparable
+heat_AUZTd2UpRh <- heatplot(filtered_ora, foldChange = filtered_lfc) +
+  scale_fill_gradient(low = "#cedfce", high = "#710b7e", limits = c(1.002, 6.454)) +
+  scale_y_discrete(limits = top_go_terms) +  # Show only the top 5 GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_AUZTd2UpRh
+
+pdf("2.FunctionalAnalysis/figures/heatplot_ora_Day2AUZUpRh_top3_colscaled_lfcordgenes.pdf", width = 8, height = 2.5)  
+print(heat_AUZTd2UpRh)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+
+head(filtered_lfc)
+summary(filtered_lfc)
+#summary(filtered_lfc)
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  1.002   1.393   1.815   2.087   2.563   4.512 
+
+#Save ordered gene list for Red Hawk
+AUZTd2UpRh_ordgenes <- ordered_gene_list
+#write.csv(AUZTd2UpRh_ordgenes, "2.FunctionalAnalysis/output/AUZTd2UpRh_ordered_genes.csv")
+
+#Save filtered_lfc for Red Hawk
+#write.csv(filtered_lfc, "2.FunctionalAnalysis/output/filtered_lfc_AUZTd2UpRh.csv")
+
+#Save the R environment until here
+#save.image("2.FunctionalAnalysis/3_Functional_Analysis.RData")
+#load("2.FunctionalAnalysis/3_Functional_Analysis.RData")
+
+```
+
+
+## Heatplots: AUZT Day 2 Stampede and Red Hawk Log2FC > 2
+```{r}
+#Heatmap for log2FC > 2
+heat_lfc2t_test <- heatplot(ora_AUZTd2UpSt_lfc2, foldChange = lfc_de_upregulated_list[[2]]) +
+  scale_fill_gradient(low="#cedfce", high = "#710b7e")
+heat_lfc2t_test
+
+
+
+head(ora_AUZTd2UpSt_lfc2@result)
+#Genes ordered by GO term based on q-value and ordered by log2FC within each GO term
+# Step 1: Order GO terms (y-axis) by q-value (lowest q-value first)
+ora_AUZTd2UpSt_lfc2@result <- ora_AUZTd2UpSt_lfc2@result[order(ora_AUZTd2UpSt_lfc2$qvalue, decreasing = TRUE), ]  # Ensures most significant GO terms appear first
+
+
+# Ensure GO terms are correctly ordered as a factor
+ora_AUZTd2UpSt_lfc2@result$Description <- factor(ora_AUZTd2UpSt_lfc2@result$Description, levels = ora_AUZTd2UpSt_lfc2@result$Description)
+
+# Step 2: Extract genes from ordered GO terms, ensuring correct order
+gene_df <- ora_AUZTd2UpSt_lfc2@result %>%
+  dplyr::select(Description, geneID) %>%
+  separate_rows(geneID, sep = "/")  # Expand genes into individual rows
+
+# Step 3: Merge with log2 fold change values & sort within each GO term
+gene_df <- gene_df %>%
+  left_join(data.frame(Gene = names(lfc_de_upregulated_list[[2]]),
+                       log2FC = lfc_de_upregulated_list[[2]]), 
+            by = c("geneID" = "Gene")) %>%
+  arrange(Description, desc(log2FC))  # Sort by GO term, then by highest log2FC
+
+# Step 4: Get final ordered gene list (ensuring only `geneID` genes are included)
+ordered_gene_list <- unique(gene_df$geneID)  
+
+# Step 5: Filter the fold-change values to include only these genes
+filtered_lfc <- lfc_de_upregulated_list[[2]][ordered_gene_list]
+summary(filtered_lfc) #to use the same scale for coloring log2FC in both St and Rh, so it's comparable
+
+# Step 6: Generate heatplot with correctly ordered GO terms and genes
+heat_AUZTd2UpSt <- heatplot(ora_AUZTd2UpSt_lfc2, foldChange = filtered_lfc) +
+  coord_equal() +
+  scale_fill_gradient(low = "#9dfc9d", high = "#710b7e") +
+  scale_y_discrete(limits = levels(ora_AUZTd2UpSt_lfc2@result$Description)) +  # Order GO terms
+  scale_x_discrete(limits = ordered_gene_list)  # Order genes within GO term by log2FC
+
+# Display the heatmap
+heat_AUZTd2UpSt
+
+
+#Save the plot as pdf
+pdf("2.FunctionalAnalysis/figures/heatplot_Day2AUZUpSt_lfc2ord2.pdf", width = 6, height = 2.5)  
+print(heat_AUZTd2UpSt)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+#Stampede:
+AUZTd2UpStlfc2_sum <- summary(filtered_lfc)
+AUZTd2UpStlfc2_sum
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  2.026   2.405   3.230   3.528   4.156   6.454 
+
+#Add colnames to filtered_lfc
+colnames(filtered_lfc) <- "log2FC"
+#Save ordered gene list for Red Hawk
+AUZTd2UpSt_ordgenes_lfc2 <- data.frame(filtered_lfc)
+colnames(AUZTd2UpSt_ordgenes_lfc2) <- c("log2FC")
+
+#Save filtered_lfc for Stampede 
+#write.csv(AUZTd2UpSt_ordgenes_lfc2, "2.FunctionalAnalysis/output/AUZTd2UpSt_ordgenes_lfcgt2_qv0p005.csv")
+```
+
+
+
+Loops through all annotated lists, performs ORA (Overrepresentation Analysis) using enricher(), and generates both dot plots and heat plots. The plots are saved as PDFs in a specified folder, named using the list name and contrast name.
+
+```{r}
+# Load necessary libraries
+library(clusterProfiler)
+library(ggplot2)
+library(ggplotify)
+
+# Define output folder for figures
+output_folder <- "2.FunctionalAnalysis/figures/ora_plots_pval0p05/"
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+# Loop through each annotated list
+for (list_name in names(annotated_lists)) {
+  annotated_data <- annotated_lists[[list_name]]
+  
+  for (contrast_name in names(annotated_data)) {
+    test_genes_ann <- as.data.frame(annotated_data[[contrast_name]])
+    
+    # Skip if there are no genes
+    if (nrow(test_genes_ann) == 0 || is.null(test_genes_ann$gene_name1)) {
+      message("Skipping ORA for: ", list_name, " -> ", contrast_name, " (No genes available)")
+      next
+    }
+    
+    # Perform ORA using enricher()
+    ora_test <- enricher(
+      gene = test_genes_ann$gene_name1,
+      universe = all_pv_genes_ann$gene_name1,
+      TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")],
+      pAdjustMethod = "BH",
+      pvalueCutoff = 0.05 # changed from 0.1 to 0.05
+    )
+    
+    # Check if ORA returned valid results
+    if (is.null(ora_test) || nrow(ora_test) == 0) {
+      message("No significant enrichment for: ", list_name, " -> ", contrast_name)
+      next
+    }
+    
+    # Generate Dot Plot
+    dot_plot <- dotplot(ora_test, showCategory = 20, title = paste("ORA:", contrast_name))
+    
+    # Save Dot Plot as PDF
+    dotplot_pdf <- paste0(output_folder, "dotplot_", list_name, "_", contrast_name, ".pdf")
+    pdf(dotplot_pdf, width = 6.5, height = 6)
+    print(dot_plot)
+    dev.off()
+    
+    # Generate Heat Plot
+    heat_plot <- heatplot(ora_test, foldChange = lfc_de_results_list_pos[[contrast_name]]) +
+      scale_fill_gradient(low = "#cedfce", high = "#710b7e")
+    
+    # Save Heat Plot as PDF
+    heatplot_pdf <- paste0(output_folder, "heatplot_", list_name, "_", contrast_name, ".pdf")
+    pdf(heatplot_pdf, width = 10, height = 2.5)
+    print(heat_plot)
+    dev.off()
+    
+    message("Saved ORA plots for: ", list_name, " -> ", contrast_name)
+  }
+}
+
+message("All ORA plots saved successfully.")
+
+```
+
+
+Extract the top 5 enriched GO terms from each ora_test in annotated_lists and save the results as a CSV file:
+```{r}
+# Initialize an empty data frame to store results
+enriched_go_results <- data.frame()
+
+# Loop through each list in annotated_lists
+for (list_name in names(annotated_lists)) {
+  
+  # Loop through each contrast in the list
+  for (contrast_name in names(annotated_lists[[list_name]])) {
+    
+    # Get the annotated genes for the contrast
+    test_genes_ann <- as.data.frame(annotated_lists[[list_name]][[contrast_name]])
+    
+    # Perform ORA
+    ora_test <- enricher(
+      gene = test_genes_ann$gene_name1, 
+      universe = all_pv_genes_ann$gene_name1, 
+      TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")], 
+      pAdjustMethod = "BH",
+      pvalueCutoff = 0.1
+    )
+    
+    # Check if enrichment results exist
+    if (!is.null(ora_test) && nrow(as.data.frame(ora_test)) > 0) {
+      
+      # Convert ORA results to a data frame
+      ora_df <- as.data.frame(ora_test)
+      
+      # Select top 5 enriched GO terms
+      top_5_ora <- ora_df[order(ora_df$p.adjust), ][1:min(5, nrow(ora_df)), ]
+      
+      # Add columns to track source list and contrast
+      top_5_ora$list_name <- list_name
+      top_5_ora$contrast_name <- contrast_name
+      
+      # Append results to the final data frame
+      enriched_go_results <- rbind(enriched_go_results, top_5_ora)
+    }
+  }
+}
+
+# Save results as a CSV file
+write.csv(enriched_go_results, "2.FunctionalAnalysis/output/top_5_enriched_GO_terms.csv", row.names = FALSE)
+
+```
+### Adding the specific contrast name to the degs_unique_list, since the current contrast name is just the group name I set
+
+This will help to identify the contrast in the final results
+Match the names in degs_unique_list_pos with the names inside annotated_lists[[list_name]], and extract $name from degs_unique_list_pos accordingly.
+```{r}
+#Adding $name from degs_unique_list_pos to degs_unique_list
+names(annotated_lists)
+unique(names(annotated_lists[[2]][[1]]))
+names(annotated_lists[[1]])
+names(annotated_lists[[2]])
+head(annotated_lists[[2]][[1]])
+
+names(degs_unique_list_pos)
+names(degs_unique_list_pos[[1]])
+
+unique(names(annotated_lists[[2]][[1]]))
+#Check that the order in degs_unique_list_pos is the same as in annotated_lists
+all.equal(names(annotated_lists[[1]]), names(degs_unique_list_pos))
+all.equal(names(annotated_lists[[2]]), names(degs_unique_list_pos))
+
+#For each contrast_name in annotated_lists[[list_name]], check if it exists in degs_unique_list_pos.
+#If a match is found, extract $name from degs_unique_list_pos[[contrast_name]].
+#Only apply this change to lists in annotated_lists that start with "degs_unique_list".
+
+# Initialize an empty data frame to store results
+enriched_go_results <- data.frame()
+
+# Loop through each list in annotated_lists
+for (list_name in names(annotated_lists)) {
+  
+  # Loop through each contrast in the list
+  for (contrast_name in names(annotated_lists[[list_name]])) {
+    
+    # Initialize second contrast name as NA
+    second_contrast_name <- NA
+    
+    # If the list name starts with "degs_unique_list" and contrast_name exists in degs_unique_list_pos, extract the name
+    if (grepl("^degs_unique_list", list_name) && contrast_name %in% names(degs_unique_list_pos)) {
+      if (!is.null(degs_unique_list_pos[[contrast_name]]$name)) {
+        second_contrast_name <- paste(unique(degs_unique_list_pos[[contrast_name]]$name), collapse = ", ")
+      }
+    }
+    
+    # Get the annotated genes for the contrast
+    test_genes_ann <- as.data.frame(annotated_lists[[list_name]][[contrast_name]])
+    
+    # Perform ORA
+    ora_test <- enricher(
+      gene = test_genes_ann$gene_name1, 
+      universe = all_pv_genes_ann$gene_name1, 
+      TERM2GENE = all_pv_genes_ann[, c("go_desc", "gene_name1")], 
+      pAdjustMethod = "BH",
+      pvalueCutoff = 0.1
+    )
+    
+    # Check if enrichment results exist
+    if (!is.null(ora_test) && nrow(as.data.frame(ora_test)) > 0) {
+      
+      # Convert ORA results to a data frame
+      ora_df <- as.data.frame(ora_test)
+      
+      # Select top 5 enriched GO terms
+      top_5_ora <- ora_df[order(ora_df$p.adjust), ][1:min(5, nrow(ora_df)), ]
+      
+      # Replace "/" with "," in geneID
+      top_5_ora$geneID <- gsub("/", ",", top_5_ora$geneID)
+      
+      # Add columns to track source list and contrast
+      top_5_ora$list_name <- list_name
+      
+      # Append second contrast name only if it was found
+      if (!is.na(second_contrast_name)) {
+        top_5_ora$contrast_name <- paste(contrast_name, second_contrast_name, sep = " | ")
+      } else {
+        top_5_ora$contrast_name <- contrast_name
+      }
+      
+      # Append results to the final data frame
+      enriched_go_results <- rbind(enriched_go_results, top_5_ora)
+    }
+  }
+}
+
+# Save results as a CSV file
+write.csv(enriched_go_results, "2.FunctionalAnalysis/output/top_5_enriched_GO_terms_contrastname.csv", row.names = FALSE)
+
+```
+
+
+##  Annotations for genes in top 5 go terms: gene description, KEGG pathway, and description from all_pv_genes_ann_gokeggpath
+```{r}
+colnames(all_pv_genes_ann)
+colnames(all_pv_genes_ann_gokeggpath)
+#unique genes in all_pv_genes_ann_gokeggpath
+unique_genes <- unique(all_pv_genes_ann_gokeggpath$gene_name1)
+head(all_pv_genes_ann_gokeggpath)
+
+names(annotated_lists_gokeggpath)
+names(annotated_lists_gokeggpath[[1]])
+head(annotated_lists_gokeggpath[[1]][[1]])
+names(annotated_lists_gokeggpath[[3]])
+
+names(annotated_lists)
+
+head(enriched_go_results)
+library(dplyr)
+
+#check if all genes in enriched_go_results are in all_pv_genes_ann_gokeggpath
+library(dplyr)
+library(tidyr)
+
+# Step 1: Extract unique genes from enriched_go_results
+genes_in_enriched_go <- enriched_go_results %>%
+  select(geneID) %>%
+  separate_rows(geneID, sep = ",") %>%  # Split multiple gene IDs
+  distinct() %>%
+  pull(geneID)  # Extract as a vector
+head(genes_in_enriched_go)
+
+# Step 2: Extract unique genes from all_pv_genes_ann_gokeggpath
+genes_in_all_pv <- all_pv_genes_ann_gokeggpath %>%
+  select(gene_name1) %>%
+  distinct() %>%
+  pull(gene_name1)  # Extract as a vector
+head(genes_in_all_pv)
+
+all(genes_in_enriched_go %in% genes_in_all_pv) #TRUE, all genes in enriched_go_results are in all_pv_genes_ann_gokeggpath
+
+# Step 3: Find missing genes (genes in enriched_go_results that are NOT in all_pv_genes_ann_gokeggpath)
+missing_genes <- setdiff(genes_in_enriched_go, genes_in_all_pv)
+head(missing_genes) #no missing genes
+# Step 4: Check results
+if (length(missing_genes) == 0) {
+  print("All genes in enriched_go_results are present in all_pv_genes_ann_gokeggpath.")
+} else {
+  print("Some genes from enriched_go_results are missing in all_pv_genes_ann_gokeggpath.")
+  print(missing_genes)  # Print missing genes
+}
+
+
+library(dplyr)
+library(tidyr)
+
+## Getting gene description, KEGG pathway, and description for enriched genes from all_pv_genes_ann_gokeggpath
+# Step 1: Split geneID into individual genes while maintaining original order
+enriched_go_genes <- enriched_go_results %>%
+  select(geneID, list_name, contrast_name) %>%
+  separate_rows(geneID, sep = ",") %>%
+  distinct() %>%
+  mutate(order_index = row_number())  # Assign row numbers to keep original order
+head(enriched_go_genes)
+
+# Step 2: Remove "interpro_id" and "interpro_desc" before filtering
+subset_all_pv_genes <- all_pv_genes_ann_gokeggpath %>%
+  select(-interpro_id, -interpro_desc) %>%  # Exclude unwanted columns
+  filter(gene_name1 %in% enriched_go_genes$geneID) %>%
+  left_join(enriched_go_genes, by = c("gene_name1" = "geneID"))  # Retain list_name & contrast_name
+
+# Step 3: Order the results to match enriched_go_genes order
+subset_all_pv_genes <- subset_all_pv_genes %>%
+  arrange(order_index)  # Maintain original order from enriched_go_genes
+
+# Step 4: Remove duplicate rows (rows with exactly the same information across all columns)
+subset_all_pv_genes <- subset_all_pv_genes %>%
+  distinct() %>%
+  select(-order_index)  # Remove ordering index before saving
+
+# Print first few rows to check output
+print(head(subset_all_pv_genes))
+
+# Step 5: Save results as a TSV file (more memory efficient in Excel)
+write.table(subset_all_pv_genes, "2.FunctionalAnalysis/output/top5GO_genes_anngokeggpath_ord.tsv", 
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+# Filter, classify, and plot Red Hawk vs Stampede upregulated genes under the "ADP binding" GO category by combined domain type (e.g., NB_LRR) 
+```{r}
+library(tidyverse)
+library(patchwork)
+
+
+# --- Define tissue info ---
+root_tissue_labels_abrev <- c("HYP", "RCR", "MBZ", "YBZ", 
+                              "AUZT", "AUZB", "RTT", "RTB")
+
+# --- 1. Read data ---
+go_data <- read_tsv("2.FunctionalAnalysis/output/top5GO_genes_anngokeggpath_ord.tsv")
+
+# --- 2. Filter by contrast and GO term ---
+go_adp_redhawk_stampede <- go_data %>%
+  filter(str_detect(contrast_name, "RedHawk_vs_Stampede")) %>%
+  filter(go_desc == "ADP binding") %>%
+  filter(list_name %in% c("de_upregulated_list", "de_downregulated_list"))
+
+# --- 3. Tissue abbreviations ---
+go_adp_redhawk_stampede <- go_adp_redhawk_stampede %>%
+  mutate(
+    tissue_full = str_extract(contrast_name, "^[^_]+"),
+    tissue_abbrev = case_when(
+      tissue_full == "Hypocotyl" ~ "HYP",
+      tissue_full == "RootCrown" ~ "RCR",
+      tissue_full == "MatureBranchedZoneTaproot" ~ "MBZ",
+      tissue_full == "YoungBranchedZoneTaproot" ~ "YBZ",
+      tissue_full == "AUZTaproot" ~ "AUZT",
+      tissue_full == "AUZBasalRoots" ~ "AUZB",
+      tissue_full == "RootTipTaproot" ~ "RTT",
+      tissue_full == "RootTipBasalRoots" ~ "RTB",
+      TRUE ~ "Other"
+    ),
+    tissue_abbrev = factor(tissue_abbrev, levels = root_tissue_labels_abrev)
+  )
+
+# --- 4. Clean and summarize gene descriptions (abbreviating LRR) ---
+gene_descriptions <- go_adp_redhawk_stampede %>%
+  select(gene_name1, gene_description) %>%
+  distinct() %>%
+  mutate(
+    gene_description_clean = str_replace_all(
+      gene_description,
+      regex("leucine[- ]rich repeat|LRR|leucine rich repeat", ignore_case = TRUE),
+      "LRR"
+    ),
+    cnl_flag = str_detect(gene_description, regex("disease resistance protein", ignore_case = TRUE))
+  ) %>%
+  group_by(gene_name1) %>%
+  summarise(
+    gene_description_concat = paste(unique(gene_description_clean), collapse = " | "),
+    lrr_in_description = any(str_detect(gene_description_clean, "LRR")),
+    cnl_flag = any(cnl_flag),
+    .groups = "drop"
+  )
+
+# --- 5. Combine domain annotations per gene, sorted with NB-ARC first ---
+gene_domains <- go_adp_redhawk_stampede %>%
+  select(gene_name1, pfam_desc) %>%
+  distinct() %>%
+  mutate(pfam_desc = ifelse(pfam_desc == "NB-ARC", paste0("0_", pfam_desc), pfam_desc)) %>%
+  group_by(gene_name1) %>%
+  summarise(combined_domain = paste(sort(unique(pfam_desc)), collapse = "_"), .groups = "drop") %>%
+  mutate(combined_domain = str_replace_all(combined_domain, "0_", ""))
+
+# --- 6. Join data and define regulation + updated NLR class including CNL ---
+go_adp_domains <- go_adp_redhawk_stampede %>%
+  left_join(gene_domains, by = "gene_name1") %>%
+  left_join(gene_descriptions, by = "gene_name1") %>%
+  mutate(
+    regulation = case_when(
+      list_name == "de_upregulated_list" ~ "Up in Stampede",
+      list_name == "de_downregulated_list" ~ "Up in Red Hawk"
+    ),
+    nlr_class = case_when(
+      str_detect(combined_domain, "NB-ARC") & str_detect(combined_domain, "Rx_N") ~ "CNL",
+      str_detect(combined_domain, "NB-ARC") & cnl_flag ~ "CNL",
+      str_detect(combined_domain, "NB-ARC") & str_detect(combined_domain, "TIR") ~ "TNL",
+      str_detect(combined_domain, "NB-ARC") & str_detect(combined_domain, "RPW8") ~ "RNL",
+      str_detect(combined_domain, "NB-ARC") & str_detect(combined_domain, "LRR") & !str_detect(combined_domain, "TIR|RPW8|Rx_N") ~ "NLR",
+      str_detect(combined_domain, "NB-ARC") & !str_detect(combined_domain, "TIR|RPW8|LRR|Rx_N") & lrr_in_description ~ "NLR",
+      str_detect(combined_domain, "NB-ARC") & !str_detect(combined_domain, "TIR|RPW8|LRR|Rx_N") ~ "NL",
+      TRUE ~ "Other"
+    )
+  )
+
+# Define desired NLR class order
+nlr_levels <- c("NL", "NLR", "CNL", "RNL", "TNL")
+
+# Set factor levels in data
+go_adp_domains <- go_adp_domains %>%
+  mutate(nlr_class = factor(nlr_class, levels = nlr_levels))
+
+#Save go_adp_domains for further analysis
+#write.csv(go_adp_domains, "2.FunctionalAnalysis/output/go_adp_domains.csv")
+
+# --- 7. Summarize counts ---
+domain_summary <- go_adp_domains %>%
+  select(gene_name1, nlr_class, regulation, tissue_abbrev) %>%
+  distinct() %>%
+  count(tissue_abbrev, nlr_class, regulation)
+
+# --- 8. Color palette for NLR class (distinct from tissues) ---
+nlr_colors <- c(
+  "TNL" = "#ff5252",
+  "NLR" = "#2c2c54",
+  "NL"  = "#474787",
+  "RNL" = "#cd6133",
+  "Other" = "#b2df8a"
+)
+
+# Shared y-limit
+max_count <- max(domain_summary$n)
+
+# Common theme
+plot_theme <- theme_classic(base_size = 16) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 0, hjust = 0.5)
+  )
+
+# --- Plot: Up in Stampede ---
+plot_up_st <- ggplot(
+  domain_summary %>% filter(regulation == "Up in Stampede"),
+  aes(x = tissue_abbrev, y = n, fill = nlr_class)
+) +
+  geom_bar(stat = "identity") +
+  #geom_text(aes(label = n), vjust = -0.3, size = 4) +
+  scale_y_continuous(limits = c(0, max_count + 2)) +
+  scale_fill_manual(values = nlr_colors) +
+  labs(
+    x = "Tissue",
+    y = "Gene Count",
+    fill = "Class"
+  ) +
+  plot_theme
+
+# --- Plot: Up in Red Hawk ---
+plot_up_rh <- ggplot(
+  domain_summary %>% filter(regulation == "Up in Red Hawk"),
+  aes(x = tissue_abbrev, y = n, fill = nlr_class)
+) +
+  geom_bar(stat = "identity") +
+  #geom_text(aes(label = n), vjust = -0.3, size = 4) +
+  scale_y_continuous(limits = c(0, max_count + 2)) +
+  scale_fill_manual(values = nlr_colors) +
+  labs(
+    x = "Tissue",
+    y = "Gene Count",
+    fill = "Class"
+  ) +
+  plot_theme
+
+
+# --- 11. Print & Save ---
+print(plot_up_st)
+print(plot_up_rh)
+
+# --- Combine plots side-by-side ---
+combined_plot <- plot_up_st + plot_up_rh +
+  plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+# --- Show combined plot ---
+print(combined_plot)
+
+# --- Save combined plot ---
+ggsave("2.FunctionalAnalysis/figures/domain_ADPbinding_combined_NLRclasses_sm.pdf",
+       plot = combined_plot,
+       dpi = 600, width = 8.5, height = 3, units = "in")
+
+
+# --- 11. Print & Save ---
+print(plot_up_st)
+print(plot_up_rh)
+
+ggsave(plot = plot_up_st,
+       filename = "2.FunctionalAnalysis/figures/domain_summary_ADPbinding_UpSt_NLRclass.pdf",
+       dpi = 600, units = "in", height = 3, width = 4.5)
+
+ggsave(plot = plot_up_rh,
+       filename = "2.FunctionalAnalysis/figures/domain_summary_ADPbinding_UpRh_NLRclass.pdf",
+       dpi = 600, units = "in", height = 3, width = 4)
+
+
+library(tidyverse)
+library(patchwork)
+
+# Prepare summary data with day and genotype
+domain_summary_facet <- go_adp_domains %>%
+  select(gene_name1, nlr_class, regulation, tissue_abbrev, contrast_name) %>%
+  distinct() %>%
+  count(gene_name1, nlr_class, regulation, tissue_abbrev, contrast_name) %>%
+  mutate(
+    genotype = case_when(
+      regulation == "Up in Stampede" ~ "Stampede",
+      regulation == "Up in Red Hawk" ~ "Red Hawk"
+    ),
+    day = str_extract(contrast_name, "_day[0-9]+"),
+    day = str_remove_all(day, "_day"),
+    day = paste0("Day ", day)
+  )
+
+# Final summary for plotting
+facet_summary <- domain_summary_facet %>%
+  group_by(tissue_abbrev, day, genotype, nlr_class) %>%
+  summarise(n = n(), .groups = "drop")
+
+nlr_colors_minimal <- c(
+  "TNL" = "#1e272e",    # Blue
+  "NLR" = "#485460",    # Green
+  "RNL" = "#808e9b",    # Red
+  "NL"  = "#d2dae2",    # Light gray
+  "Other" = "#d2dae2"   # Same as NL
+)
+
+# Faceted plot: genotype on x-axis, faceted by tissue × day
+facet_plot <- ggplot(facet_summary, aes(x = genotype, y = n, fill = nlr_class)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_grid(rows = vars(day), cols = vars(tissue_abbrev)) +
+  scale_fill_manual(values = nlr_colors_minimal) +
+  labs(
+    x = "Genotype",
+    y = "Gene Count",
+    fill = "NLR Class"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    legend.position = "bottom"
+  )
+
+# Show plot
+print(facet_plot)
+
+# Save plot
+ggsave("2.FunctionalAnalysis/figures/domain_ADPbinding_facet_by_day_tissue_sm.pdf",
+       plot = facet_plot,
+       dpi = 600, width = 6, height = 4, units = "in")
+
+
+
+nlr_colors_minimal <- c(
+  "TNL" = "#e056fd",    #05c46b
+  "NLR" = "#192a56", #485460"    
+  "RNL" = "#f6c8ef",
+  "CNL" = "#34e7e4",#32ff7e   
+  "NL"  = "#7ca8d0"
+)
+
+# Split summary by day
+day_list <- split(facet_summary, facet_summary$day)
+
+
+# Define theme with 45° x-axis text
+base_theme <- theme_classic(base_size = 16) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 11)
+  )
+
+# Create plots and store in a list
+plot_list <- list()
+
+for (day_name in names(day_list)) {
+  
+  day_data <- day_list[[day_name]]
+  
+  plot_list[[day_name]] <- ggplot(day_data, aes(x = genotype, y = n, fill = nlr_class)) +
+    geom_bar(stat = "identity", position = "stack") +
+    scale_y_continuous(limits = c(0, max_count + 2)) +
+    facet_wrap(~ tissue_abbrev, nrow = 1) +
+    scale_fill_manual(values = nlr_colors_minimal, breaks = nlr_levels) +
+    labs(
+      x = "Genotype",
+      y = "Gene Count",
+      fill = "NLR Class"
+    ) +
+    base_theme
+}
+
+# Now save each plot independently with your preferred dimensions
+ggsave(
+  filename = "2.FunctionalAnalysis/figures/domain_ADP_Day2.pdf",
+  plot = plot_list[["Day 2"]],
+  dpi = 600, width = 2.3, height = 3, units = "in"
+)
+
+ggsave(
+  filename = "2.FunctionalAnalysis/figures/domain_ADP_Day5.pdf",
+  plot = plot_list[["Day 5"]],
+  dpi = 600, width = 5, height = 3, units = "in"
+)
+
+# Optional: Display both plots in console
+print(plot_list[["Day 2"]])
+print(plot_list[["Day 5"]])  # or other day names depending on your data
+
+```
+
+
+
+# Compare GO for multiple gene lists for DEGs between genotypes, days and tissues using compareCluster
+
+## Between genotypes
+```{r}
+#
+
+#1. Subset the first 11 contrasts from each list
+# Keep only the first 11 elements (your target tissues/days)
+st_list <- annotated_lists[[3]][1:11]  # Upregulated in Stampede
+rh_list <- annotated_lists[[4]][1:11]  # Upregulated in Red Hawk
+
+#2. Name the entries to reflect genotype
+names(st_list) <- paste0("Stampede_", names(st_list))
+names(rh_list) <- paste0("RedHawk_", names(rh_list))
+
+#3. Combine and extract just the gene vectors
+gene_lists_named <- c(st_list, rh_list)
+gene_lists_named <- lapply(gene_lists_named, function(df) df$gene_name1)
+
+#4. Run compareCluster() with enricher()
+TERM2GENE <- all_pv_genes_ann_ontology[, c("go_desc", "gene_name1")]
+colnames(TERM2GENE) <- c("GOterm", "gene")
+
+library(clusterProfiler)
+
+ck <- compareCluster(
+  geneCluster = gene_lists_named,
+  fun = "enricher",
+  TERM2GENE = TERM2GENE,
+  universe = all_pv_genes_ann_ontology$gene_name1,
+  pvalueCutoff = 0.05,#0.1
+  pAdjustMethod = "BH"
+)
+
+#5. Add metadata (genotype, tissue, day) for plotting
+res <- ck@compareClusterResult
+
+res$genotype <- ifelse(grepl("^Stampede_", res$Cluster), "Stampede", "RedHawk")
+res$day <- sub(".*_day([25])_.*", "Day \\1", res$Cluster)
+res$tissue <- sub("^[^_]+_([^_]+)_.*", "\\1", res$Cluster) #tissue name, which is the string after the first underscore 
+head(res)
+
+
+# Keep the Cluster factor levels based on the order in the data frame
+cluster_order <- unique(res$Cluster)  # captures the current (correct) order
+res$Cluster <- factor(res$Cluster, levels = cluster_order)
+ck@compareClusterResult <- res
+levels(res$Cluster) #check the levels of the Cluster factor
+
+#tissue order for facet_grid
+tissue_order <- c(
+  "Hypocotyl", "RootCrown", 
+  "MatureBranchedZoneTaproot", "YoungBranchedZoneTaproot",
+  "AUZTaproot", "AUZBasalRoots", 
+  "RootTipTaproot", "RootTipBasalRoots"
+)
+
+res$tissue <- factor(res$tissue, levels = tissue_order)
+ck@compareClusterResult <- res  # reassign updated results
+
+# Save the results to a CSV file
+res_df <- ck@compareClusterResult
+#write.csv(res_df, "2.FunctionalAnalysis/output/compareCluster_GOenrichmentGeno_RhvsSt.csv", row.names = FALSE)
+
+
+#6. Plot the results
+topGO_RhvsSt_dotplot <- dotplot(ck, showCategory = 5, x = "Cluster") +
+  facet_grid(. ~ day + tissue, scales = "free_x", space = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10))
+topGO_RhvsSt_dotplot
+
+#genotype label on the x-axis
+topGO_RhvsSt_dotplot_geno <- dotplot(ck, showCategory = 5, x = "genotype") +
+  facet_grid(. ~ day + tissue, scales = "free_x", space = "free_x") +
+  #theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10)) 
+
+topGO_RhvsSt_dotplot_geno
+
+#-log10(qvalue) 
+ck@compareClusterResult$negLog10Q <- -log10(ck@compareClusterResult$qvalue)
+library(DOSE)
+library(enrichplot)
+library(ggplot2)
+
+topGO_RhvsSt_dotplot_geno_log <-dotplot(ck, showCategory = 5, x = "genotype", color = "negLog10Q") +
+  facet_grid(. ~ day + tissue, scales = "free_x", space = "free_x") +
+  scale_fill_gradient(low = "#c8d1f2", high = "#244df1")+ #limits = c(0, NA), breaks = c(1, 5, 10, 15)) + ##242ef1
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10))
+topGO_RhvsSt_dotplot_geno_log
+
+# Save topGO_RhvsSt_dotplot in PDF
+ggsave(plot = topGO_RhvsSt_dotplot_geno, filename = "2.FunctionalAnalysis/figures/compareCluster/topGO_RhvsSt_dotplot_genolabel.pdf", dpi = 600, units = "in", height = 8, width = 9)
+
+ggsave(plot = topGO_RhvsSt_dotplot_geno_log, filename = "2.FunctionalAnalysis/figures/compareCluster/topGO_RhvsSt_dotplot_geno_neglog10_v2.pdf", dpi = 600, units = "in", height = 8, width = 9)
+
+# Gene-concept network
+cnetplot(ck)
+```
+
+## Between days
+```{r}
+names(annotated_lists)
+names(annotated_lists[[3]]) #Upregulated list -> upregulated in day 5
+names(annotated_lists[[4]]) #Downregulated list -> upregulated in day 2
+#day 2 is the reference and day 5 is target, so upregulated list is upregulated in day 5 and downregulated list is upregulated in day 2
+
+#1. Subset the contrasts from each list
+# Keep only the 12:17 elements (day2 vs day 5 contrats)
+d2_list <- annotated_lists[[4]][12:17]  # Upregulated at day 2
+d5_list <- annotated_lists[[3]][12:17]  # Upregulated at day 5  
+
+#2. Name the entries to reflect genotype
+names(d2_list) <- paste0("Day2_", names(d2_list))
+names(d5_list) <- paste0("Day5_", names(d5_list))
+
+
+#3. Combine and extract just the gene vectors
+gene_lists_named <- c(d2_list, d5_list)
+gene_lists_named <- lapply(gene_lists_named, function(df) df$gene_name1)
+
+
+#4. Run compareCluster() with enricher()
+TERM2GENE <- all_pv_genes_ann_ontology[, c("go_desc", "gene_name1")]
+colnames(TERM2GENE) <- c("GOterm", "gene")
+
+
+library(clusterProfiler)
+
+ck_day <- compareCluster(
+  geneCluster = gene_lists_named,
+  fun = "enricher",
+  TERM2GENE = TERM2GENE,
+  universe = all_pv_genes_ann_ontology$gene_name1,
+  pvalueCutoff = 0.05,#0.1
+  pAdjustMethod = "BH"
+)
+
+#5. Add metadata (genotype, tissue, day) for plotting
+res_day <- ck_day@compareClusterResult
+head(res_day)
+
+# Extract day (from prefix)
+res_day$day <- ifelse(grepl("^Day2_", res_day$Cluster), "Day2", "Day5")
+#Extract genotype (after tissue, before day)
+res_day$genotype <- sub("^Day[25]_[^_]+_([^_]+)_.*", "\\1", res_day$Cluster)
+# Extract tissue (after DayX_)
+res_day$tissue <- sub("^Day[25]_([^_]+)_.*", "\\1", res_day$Cluster)
+
+
+# Keep the Cluster factor levels based on the order in the data frame
+cluster_order <- unique(res_day$Cluster)  # captures the current (correct) order
+res_day$Cluster <- factor(res_day$Cluster, levels = cluster_order)
+ck_day@compareClusterResult <- res_day
+levels(res_day$Cluster) #check the levels of the Cluster factor
+
+#tissue order for facet_grid
+tissue_order <- c(
+  "Hypocotyl", "RootCrown", 
+  "MatureBranchedZoneTaproot", "YoungBranchedZoneTaproot",
+  "AUZTaproot", "AUZBasalRoots", 
+  "RootTipTaproot", "RootTipBasalRoots"
+)
+
+res_day$tissue <- factor(res_day$tissue, levels = tissue_order)
+ck_day@compareClusterResult <- res_day  # reassign updated results
+
+# Save the results to a CSV file
+res_day_df <- ck_day@compareClusterResult
+head(res_day_df)
+#write.csv(res_day_df, "2.FunctionalAnalysis/output/compareCluster_GOenrichmentDay_d2vsd5.csv", row.names = FALSE)
+
+
+#6. Plot the results
+topGO_d2vsd5_dotplot <- dotplot(ck_day, showCategory = 5, x = "Cluster") +
+  facet_grid(. ~ genotype + tissue, scales = "free_x", space = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10))
+topGO_d2vsd5_dotplot
+
+#day label on the x-axis
+topGO_d2vsd5_dotplot_day <- dotplot(ck_day, showCategory = 5, x = "day") +
+  facet_grid(. ~ genotype + tissue, scales = "free_x", space = "free_x") +
+  #theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10)) 
+
+topGO_d2vsd5_dotplot_day
+
+# Save topGO_RhvsSt_dotplot in PDF
+ggsave(plot = topGO_d2vsd5_dotplot_day, filename = "2.FunctionalAnalysis/figures/compareCluster/topGO_d2vsd5_dotplot_daylabel.pdf", dpi = 600, units = "in", height = 8, width = 9)
+
+#-log10(qvalue) 
+ck_day@compareClusterResult$negLog10Q <- -log10(ck_day@compareClusterResult$qvalue)
+
+
+topGO_d2vsd5_dotplot_day_log <- dotplot(ck_day, showCategory = 5, x = "day", color = "negLog10Q") +
+  facet_grid(. ~ genotype + tissue, scales = "free_x", space = "free_x") +
+  scale_fill_gradient(low = "#c8d1f2", high = "#244df1") + 
+  #theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 10)) 
+topGO_d2vsd5_dotplot_day_log
+
+#Save log plot
+ggsave(plot = topGO_d2vsd5_dotplot_day_log, filename = "2.FunctionalAnalysis/figures/compareCluster/topGO_d2vsd5_dotplot_day_neglog10.pdf", dpi = 600, units = "in", height = 7.5, width = 7) 
+
+
+
+# Gene-concept network
+cnetplot(ck)
+```
+
+
+
+# Expression (normalized gene counts) for enriched genes in GO terms
+From script: 1_RDGA_Alltissues_nfstarsalmon.Rmd
+Variance stabilization of counts
+This step here is to visualize the variance stabilization step and to make PCA plot with stabilized counts. 
+Normalization is automatically performed by DESeq2 when running the DESeq() function.
+
+ Note, as suggested in the DESeq2 vignette: 
+ - I used raw counts as input to DESeq() for differential expression analysis. 
+   DESeq2 handles normalization and modeling internally to calculate log2 fold changes.
+ - For visualizations (e.g., PCA, clustering, boxplots), I used VST counts 
+   to stabilize variance and enable meaningful sample comparisons.
+   
+
+From DESeq2 vignette:
+https://bioconductor.riken.jp/packages/3.17/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+about vst: In all cases, the transformation is scaled such that for large counts, it becomes asymptotically (for
+large values) equal to the logarithm to base 2 of normalized counts.
+
+Maybe the most obvious choice of transformation is the logarithm. Since count values for a gene can be zero in some conditions (and non-zero in others), some advocate the use of pseudocounts, i.e. transformations of the form:
+
+𝑦=log2(𝑛+𝑛0)
+
+where n represents the count values and 𝑛0 is a positive constant.
+
+In this section, we discuss two alternative approaches that offer more theoretical justification and a rational way of choosing parameters equivalent to 𝑛0 above. 
+One makes use of the concept of variance stabilizing transformations (VST) (Tibshirani 1988; Huber et al. 2003; Anders and Huber 2010), and the other is the regularized logarithm or rlog, 
+which incorporates a prior on the sample differences (Love, Huber, and Anders 2014). 
+Both transformations produce transformed data on the log2 scale which has been normalized with respect to library size or other normalization factors.
+
+
+```{r}  
+#only roots ids
+root_ids <- sampledata %>% 
+  filter(!Tissue == "Leaf") %>% 
+  pull(sample)
+
+#This is using vst-transformed counts, note range of values 
+#Filter t_variance_stabilised_counts to only roots
+t_variance_stabilised_counts_roots <- t_variance_stabilised_counts[root_ids,]
+dim(t_variance_stabilised_counts_roots)
+range(t_variance_stabilised_counts_roots) #1.165345 14.649631
+t_variance_stabilised_counts_roots[1:5,1:3]
+
+
+library(DESeq2)
+dds_roots_norm <- vst(dds_roots)
+
+# Retrieve the normalized data from the `DESeqDataSet`
+normalized_counts_roots <- assay(dds_roots_norm) %>%
+  t() # Transpose this data
+
+normalized_counts_roots[1:5,1:3]
+dim(normalized_counts_roots)
+range(normalized_counts_roots)#2.673161 14.663412
+
+#Log2 transformation option, range is similar to variance stabilized counts
+#These values are not affected by the DESeq contrast and reflect library-size 
+#normalized expression for each gene across all samples.
+
+# Extract normalized counts
+deseqnorm_counts_roots <- counts(dds_roots, normalized = TRUE)
+# Check the range of the normalized counts
+range(deseqnorm_counts_roots) #0.00 25936.61
+# Log2 transformation
+log2norm_counts_roots <- log2(deseqnorm_counts_roots + 1)
+# Check the range of the log2-transformed counts  
+range(log2norm_counts_roots) #0.00000 14.66276
+
+
+#Remove version 
+colnames(normalized_counts_roots) <- gsub("\\.v2\\.1$", "", colnames(normalized_counts_roots))
+head(colnames(normalized_counts_roots), 3)
+
+#Transpose normalized counts
+normalized_counts_roots_t  <- t(normalized_counts_roots)
+head(normalized_counts_roots_t)
+#
+colnames(sampledataord_roots)
+head(sampledataord_roots)
+# Check if column names match the Sample_ID values exactly and in the same order
+all(colnames(normalized_counts_roots_t) == sampledataord_roots$sample)
+
+# Compare elements one by one
+which(colnames(normalized_counts_roots_t) != sampledataord_roots$sample)
+
+#colnames(normalized_counts_roots_t) <- sampledataord_roots$Sample_ID
+
+
+
+allmod_df = data.frame(normalized_counts_roots_t) %>%
+  mutate(
+    gene_id = row.names(.)
+  ) %>%
+  pivot_longer(-gene_id)
+
+head(allmod_df)
+#module column as factor
+#allmod_df$module <- factor(allmod_df$module)
+
+#Levels of name column 
+unique(allmod_df$name) 
+
+#Add tissue, day and genotype columns
+colnames(sampledataord_roots)
+head(sampledataord_roots)
+
+allmod_df <- allmod_df %>%
+  mutate(
+    Tissue = sampledataord_roots$Tissue[match(name, sampledataord_roots$sample)],
+    Day = sampledataord_roots$Day[match(name, sampledataord_roots$sample)],
+    Genotype = sampledataord_roots$Genotype[match(name, sampledataord_roots$sample)]   
+  )
+head(allmod_df)
+
+#Read gene tables
+AUZTd2UpSt_ordgenes <- read.csv("2.FunctionalAnalysis/output/AUZTd2UpSt_ordered_genes.csv")
+AUZTd2UpRh_ordgenes <- read.csv("2.FunctionalAnalysis/output/AUZTd2UpRh_ordered_genes.csv")
+AUZTd2UpSt_ordgenes <- AUZTd2UpSt_ordgenes[[2]]
+AUZTd2UpRh_ordgenes <- AUZTd2UpRh_ordgenes[[2]]
+
+#Create objects for each GO term
+AUZTd2UpSt_biotic  <- AUZTd2UpSt_ordgenes[1:5]
+AUZTd2UpSt_heme  <- AUZTd2UpSt_ordgenes[6:21]
+AUZTd2UpSt_ADP  <- AUZTd2UpSt_ordgenes[22:44]
+
+AUZTd2UpRh_heme  <- AUZTd2UpRh_ordgenes[1:14]
+AUZTd2UpRh_ADP  <- AUZTd2UpRh_ordgenes[15:29]
+AUZTd2UpRh_monoxy  <- AUZTd2UpRh_ordgenes[30:36]
+
+
+head(allmod_df)
+
+# For St
+my_AUZTd2UpSt_genes <- allmod_df %>% 
+  filter(gene_id %in% AUZTd2UpSt_ordgenes) %>%
+  mutate(gene_id = factor(gene_id, levels = AUZTd2UpSt_ordgenes))
+
+# For Rh
+my_AUZTd2UpRh_genes <- allmod_df %>% 
+  filter(gene_id %in% AUZTd2UpRh_ordgenes) %>%
+  mutate(gene_id = factor(gene_id, levels = AUZTd2UpRh_ordgenes))
+
+
+my_AUZTd2UpSt_ADP <- allmod_df %>% 
+  filter(gene_id %in% c(AUZTd2UpSt_ADP))
+
+my_AUZTd2UpRh_ADP <- allmod_df %>% 
+  filter(gene_id %in% c(AUZTd2UpRh_ADP))
+
+levels(sampledataord_roots$Tissue)
+levels(sampledataord_roots$Genotype)
+levels(sampledataord_roots$Day)
+
+#Enriched genes plot - tissue on x axis
+library(ggplot2)
+library(patchwork)
+
+GENE_tissue_plot <- my_AUZTd2UpSt_ADP %>% 
+  filter(Day == "day2" |
+         Day == "day5") %>%
+  mutate(order_x = case_when(
+    str_detect(Tissue, "Hypocotyl") ~ 1,
+    str_detect(Tissue, "RootCrown") ~ 2,
+    str_detect(Tissue, "MatureBranchedZoneTaproot") ~ 3,
+    str_detect(Tissue, "YoungBranchedZoneTaproot") ~ 4,
+    str_detect(Tissue, "AUZTaproot") ~ 5,
+    str_detect(Tissue, "AUZBasalRoots") ~ 6,
+    str_detect(Tissue, "RootTipTaproot") ~ 7,
+    str_detect(Tissue, "RootTipBasalRoots") ~ 8
+  )) %>% 
+  #mutate(Tissue = reorder(Tissue, order_x)) %>% 
+  mutate(Tissue = factor(Tissue, levels = unique(Tissue[order(order_x)]))) %>%
+  mutate(Tissue = droplevels(Tissue))%>% 
+  ggplot(aes(x = Tissue, y = value, fill = Genotype)) +
+  #facet_grid(gene_id ~ Day, scales = "free_y") +
+  facet_grid(~ Day, scales = "free_y") +
+  #geom_dotplot(binaxis='y', stackdir='center', color = "white", size = 0.1, 
+   #          alpha = 0.3, position=position_dodge(0.1)) +
+  geom_jitter( aes(color = Genotype),
+  position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+  size = 1, alpha = 0.4, show.legend = FALSE) +
+  #stat_summary(fun.y = mean, geom = "line", aes(group = Genotype, color = Genotype), alpha = 0.8, size = 1.1) +  # Add mean line
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1),
+                #aes(group = Genotype, color = Genotype), 
+                 geom="pointrange", position=position_dodge(0.8))+
+  scale_color_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) +
+  scale_fill_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) + # Add fill scale 
+  #stat_summary(geom = "line", aes(group = gene_id), 
+  #             fun = mean, alpha = 0.8, size = 1.1, color = "grey20") +
+  #scale_fill_manual(values = brewer.pal(8, "Set2")) +
+  labs(x = NULL,
+       y = "Normalized gene counts") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    panel.spacing = unit(1, "lines"),
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_blank(),
+    strip.background = element_blank(),
+    panel.grid = element_blank()
+  )
+
+GENE_tissue_plot
+
+module_lines_color_strip <- expand.grid(
+  Tissue = unique(sampledataord_roots$Tissue[sampledataord_roots$Tissue != "Leaf"]),
+  Day = unique(sampledataord_roots$Day[sampledataord_roots$Day %in% c("day2", "day5")]), 
+  stringsAsFactors = F
+) %>% 
+  mutate(order_x = case_when(
+        str_detect(Tissue, "Hypocotyl") ~ 1,
+    str_detect(Tissue, "RootCrown") ~ 2,
+    str_detect(Tissue, "MatureBranchedZoneTaproot") ~ 3,
+    str_detect(Tissue, "YoungBranchedZoneTaproot") ~ 4,
+    str_detect(Tissue, "AUZTaproot") ~ 5,
+    str_detect(Tissue, "AUZBasalRoots") ~ 6,
+    str_detect(Tissue, "RootTipTaproot") ~ 7,
+    str_detect(Tissue, "RootTipsBasalRoots") ~ 8
+  )) %>% 
+  mutate(Tissue = factor(Tissue, levels = c(
+   "Hypocotyl",
+     "RootCrown",
+     "MatureBranchedZoneTaproot",
+     "YoungBranchedZoneTaproot",
+     "AUZTaproot",
+     "AUZBasalRoots",
+     "RootTipTaproot",
+     "RootTipBasalRoots"
+  ))) %>% 
+  #mutate(Tissue = reorder(Tissue, order_x)) %>%
+  mutate(Tissue = factor(Tissue, levels = unique(Tissue[order(order_x)]))) %>%
+  mutate(Tissue = droplevels(Tissue))%>% 
+  ggplot(aes(x = Tissue, y = 1)) +
+  facet_grid(. ~ Day) +
+  geom_tile(aes(fill = Tissue)) +
+  scale_fill_manual(values = my_pal_RDGA) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    strip.text = element_blank(),
+    text = element_text(size = 14),
+    panel.spacing = unit(1, "lines"),
+    panel.grid = element_blank()   
+  )
+
+GENE_tissue <- wrap_plots(GENE_tissue_plot, module_lines_color_strip,
+           nrow = 2, heights = c(1, 0.08))
+
+GENE_tissue
+
+# Save GENE_tissue plot in PDF
+ggsave(plot = GENE_tissue, filename = "2.FunctionalAnalysis/figures/AUZTd2UpSt_ADP.pdf", dpi = 600, units = "in", height = 2.5, width =5)
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(ggsignif)
+library(tidyverse)
+
+
+head(my_AUZTd2UpSt_genes)
+#day subset to day2 
+
+my_AUZTd2UpSt_d2 <- my_AUZTd2UpSt_ADP %>% 
+  filter(Day == "day2") %>% 
+  mutate(order_x = case_when(
+    str_detect(Tissue, "Hypocotyl") ~ 1,
+    str_detect(Tissue, "RootCrown") ~ 2,
+    str_detect(Tissue, "MatureBranchedZoneTaproot") ~ 3,
+    str_detect(Tissue, "YoungBranchedZoneTaproot") ~ 4,
+    str_detect(Tissue, "AUZTaproot") ~ 5,
+    str_detect(Tissue, "AUZBasalRoots") ~ 6,
+    str_detect(Tissue, "RootTipTaproot") ~ 7,
+    str_detect(Tissue, "RootTipBasalRoots") ~ 8
+  ))%>%
+   mutate(Tissue = reorder(Tissue, order_x))
+
+
+my_AUZTd2UpRh_d5 <- my_AUZTd2UpRh_ADP %>% 
+  filter(Day == "day5") %>% 
+  mutate(order_x = case_when(
+    str_detect(Tissue, "Hypocotyl") ~ 1,
+    str_detect(Tissue, "RootCrown") ~ 2,
+    str_detect(Tissue, "MatureBranchedZoneTaproot") ~ 3,
+    str_detect(Tissue, "YoungBranchedZoneTaproot") ~ 4,
+    str_detect(Tissue, "AUZTaproot") ~ 5,
+    str_detect(Tissue, "AUZBasalRoots") ~ 6,
+    str_detect(Tissue, "RootTipTaproot") ~ 7,
+    str_detect(Tissue, "RootTipBasalRoots") ~ 8
+  ))%>%
+   mutate(Tissue = reorder(Tissue, order_x))
+
+
+# annotation table with adjusted pvals and y-position of the labels
+anno_df <- compare_means(value ~ Genotype, group.by = "Tissue", data = my_AUZTd2UpRh_d5, p.adjust.method = "holm") %>%
+ mutate(y_pos = 10.5, p.adj = format.pval(p.adj, digits = 2))
+
+# Create a boxplot and add custom p-value
+GENE_sig <- ggdotplot(my_AUZTd2UpRh_d5, x = "Genotype", y = "value", ggtheme = theme_classic())+
+  facet_wrap(~Tissue) + 
+  geom_signif(
+    data=anno_df, 
+    aes(xmin = group1, xmax = group2, annotations = p.adj, y_position = y_pos), 
+    manual= TRUE
+  )
+
+GENE_sig <- ggdotplot(my_AUZTd2UpRh_d5, x = "gene_id", y = "value", ggtheme = theme_classic())+
+  facet_wrap(~Tissue ) + 
+  geom_signif(
+    data=anno_df, 
+    aes(xmin = group1, xmax = group2, annotations = p.adj, y_position = y_pos), 
+    manual= TRUE
+  )
+GENE_sig <- ggdotplot(
+  my_AUZTd2UpRh_d5,
+  x = "Genotype",     # Compare genotypes
+  y = "value",
+  ggtheme = theme_classic()
+) +
+  facet_wrap(~ Tissue + gene_id, scales = "free_y") +  # Separate panel per gene in each tissue
+  geom_signif(
+    data = anno_df,
+    aes(xmin = group1, xmax = group2, annotations = p.adj, y_position = y_pos),
+    manual = TRUE
+  )
+GENE_sig <- ggdotplot(
+  my_AUZTd2UpRh_d5,
+  x = "gene_id",
+  y = "value",
+  color = "Genotype",  # Map color to genotype
+  ggtheme = theme_classic()
+) +
+  facet_wrap(~Tissue, scales = "free_y") +
+  scale_color_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) +  # custom colors
+  geom_signif(
+    data = anno_df,
+    aes(xmin = group1, xmax = group2, annotations = p.adj, y_position = y_pos),
+    manual = TRUE
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+GENE_sig
+ggsave(plot = GENE_sig, filename = "2.FunctionalAnalysis/figures/AUZTd2UpRhd5_ADPd2sig.pdf", dpi = 600, units = "in", height = 8, width =8)
+
+
+
+
+#Enriched genes tidyplot 
+#Stampede 
+library(tidyplots)
+GENE_barplot  <- my_AUZTd2UpSt_genes |>
+  dplyr::filter(Day == "day2") |>
+  dplyr::filter(Tissue == "AUZTaproot") |>
+  dplyr::mutate(
+    gene_id = factor(gene_id, levels = AUZTd2UpSt_ordgenes)
+  ) |>
+  tidyplot(x = gene_id, y = value, color = Genotype) |>
+  add_mean_bar(alpha = 0.3) |>
+  add_sem_errorbar() |>
+  add_data_points() |>
+  add_test_asterisks(hide_info = TRUE)|> #defult is "t_test",
+  adjust_colors(c("RedHawk" = "brown4", "Stampede" = "burlywood")) |> 
+  adjust_size(width = 178, height = 60) |>
+  adjust_x_axis(rotate_labels = 45) |>
+  adjust_y_axis(title = "$VST-normalized~gene~counts~(log[2])$")|>
+  remove_legend() 
+  #split_plot(by = c(Tissue), ncol = 2, width = 178, height = 100) #tidyplot uses mm
+GENE_barplot
+
+ggsave(GENE_barplot, filename = "2.FunctionalAnalysis/figures/enriched_genes/genes_barplot_AUZTd2UpSt.pdf", width = 8, height = 3)
+
+unique(my_AUZTd2UpSt_genes$gene_id)
+
+#RedHawk
+library(tidyplots)
+GENE_barplot_Rh  <- my_AUZTd2UpRh_genes |>
+  dplyr::filter(Day == "day2") |>
+  dplyr::filter(Tissue == "AUZTaproot") |>
+  dplyr::mutate(
+    gene_id = factor(gene_id, levels = AUZTd2UpRh_ordgenes)
+  ) |>
+  tidyplot(x = gene_id, y = value, color = Genotype) |>
+  add_mean_bar(alpha = 0.3) |>
+  add_sem_errorbar() |>
+  add_data_points() |>
+  add_test_asterisks(hide_info = TRUE)|>
+  adjust_colors(c("RedHawk" = "brown4", "Stampede" = "burlywood")) |> 
+  adjust_size(width = 178, height = 60) |>
+  adjust_x_axis(rotate_labels = 45) |>
+  adjust_y_axis(title = "$VST-normalized~gene~counts~(log[2])$")|>
+  remove_legend()
+  #split_plot(by = c(Tissue), ncol = 2, width = 178, height = 100) #tidyplot uses mm
+GENE_barplot_Rh
+ggsave(GENE_barplot_Rh, filename = "2.FunctionalAnalysis/figures/enriched_genes/genes_barplot_AUZTd2UpRh.pdf", width = 8, height = 3)
+ 
+
+
+
+#load("2.FunctionalAnalysis/3_Functional_Analysis.RData")
+library(ggpubr)
+library(dplyr)
+library(ggplot2)
+library(dplyr)
+library(ggplot2)
+library(ggsignif)
+# For St
+my_AUZTd2UpSt_genes <- allmod_df %>% 
+  filter(gene_id %in% AUZTd2UpSt_ordgenes) %>%
+  mutate(gene_id = factor(gene_id, levels = AUZTd2UpSt_ordgenes))
+
+# For Rh
+my_AUZTd2UpRh_genes <- allmod_df %>% 
+  filter(gene_id %in% AUZTd2UpRh_ordgenes) %>%
+  mutate(gene_id = factor(gene_id, levels = AUZTd2UpRh_ordgenes))
+
+# Make sure gene_id is a factor
+my_AUZTd2UpSt_genes <- my_AUZTd2UpSt_genes %>%
+  mutate(gene_id = factor(gene_id))
+
+my_AUZTd2UpRh_genes <- my_AUZTd2UpRh_genes %>%
+  mutate(gene_id = factor(gene_id))
+
+
+library(dplyr)
+library(ggplot2)
+#St
+# Ensure gene_id is a factor
+my_AUZTd2UpSt_genes <- my_AUZTd2UpSt_genes %>%
+  mutate(gene_id = factor(gene_id))
+
+# Get all unique Tissue-Day combinations
+combos <- my_AUZTd2UpSt_genes %>%
+  distinct(Tissue, Day)
+
+
+#Rh
+# Ensure gene_id is a factor
+my_AUZTd2UpRh_genes <- my_AUZTd2UpRh_genes %>%
+  mutate(gene_id = factor(gene_id))
+
+# Get all unique Tissue-Day combinations
+combos <- my_AUZTd2UpRh_genes %>%
+  distinct(Tissue, Day)
+
+
+plot_list <- list()
+sig_table_list <- list()
+
+# Loop over each Tissue + Day
+for (i in 1:nrow(combos)) {
+  
+  tissue_name <- combos$Tissue[i]
+  day_value <- combos$Day[i]
+  
+  df_subset <- my_AUZTd2UpRh_genes %>%
+    filter(Tissue == tissue_name, Day == day_value) %>%
+    mutate(
+      gene_id = factor(gene_id),
+      gene_num = as.numeric(gene_id)
+    )
+  
+  gene_positions <- df_subset %>%
+    select(gene_id) %>%
+    distinct() %>%
+    mutate(gene_num = as.numeric(gene_id))
+  
+  # Run t-tests and collect p-values (NO plotting)
+  test_results <- df_subset %>%
+    group_by(gene_id) %>%
+    summarise(
+      p = tryCatch(
+        t.test(value ~ Genotype)$p.value,
+        error = function(e) NA_real_
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p.adj = p.adjust(p, method = "fdr"),
+      Tissue = tissue_name,
+      Day = day_value
+    )
+  
+  # Save the significance table
+  sig_key <- paste(tissue_name, day_value, sep = "_")
+  sig_table_list[[sig_key]] <- test_results
+  
+  # Build the plot (without geom_signif)
+  # compare_means(value ~ Genotype, data = df_subset, 
+  #             group.by = "gene_id", method = "t.test")
+  p <- ggplot(df_subset, aes(x = gene_num, y = value)) +
+    geom_jitter(aes(color = Genotype),
+                position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+                size = 1, alpha = 0.4, show.legend = FALSE) +
+    stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1),
+                 geom = "pointrange",
+                 position = position_dodge(0.8),
+                 aes(color = Genotype)) +
+    scale_color_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) +
+    scale_fill_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) +
+    scale_x_continuous(
+      breaks = gene_positions$gene_num,
+      labels = gene_positions$gene_id
+    ) +
+    theme_classic() +
+    labs(
+      title = paste("Tissue:", tissue_name, "| Day:", day_value),
+      x = "Gene ID") +
+      ylab(expression("VST-normalized gene counts (log"[2]*") scale")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  #p + stat_compare_means(aes(group = Genotype),
+   #                      label = "p.signif",
+                        #  method = "t.test",
+                        #  comparisons = list(c("RedHawk", "Stampede")),
+                        #  hide.ns = TRUE,
+                        #  size = 3) +
+   #stat_compare_means(label.y = 10.5, size = 3)
+  plot_list[[sig_key]] <- p
+}
+
+
+names(plot_list)
+# Show one plot
+print(plot_list[["Hypocotyl_day5"]])  # example
+
+# See significance tables
+names(sig_table_list)
+#view p-values for Hypocotyl_day5
+sig_table_list[["Hypocotyl_day5"]]
+
+ggsave(plot = plot_list[["Hypocotyl_day5"]], filename = "2.FunctionalAnalysis/figures/AUZTd2UpSt_genes_test.pdf", dpi = 600, units = "in", height = 4, width =12)
+ggsave(plot = plot_list[["Hypocotyl_day5"]], filename = "2.FunctionalAnalysis/figures/AUZTd2UpRh_genes_test.pdf", dpi = 600, units = "in", height = 4, width =12)
+
+
+# Save all St
+for (name in names(plot_list)) {
+  ggsave(paste0("2.FunctionalAnalysis/figures/enriched_genes/AUZTd2UpSt", name, ".pdf"), plot_list[[name]], height = 4, width =10)
+}
+
+# Save all Rh
+for (name in names(plot_list)) {
+  ggsave(paste0("2.FunctionalAnalysis/figures/enriched_genes/AUZTd2UpRh", name, ".pdf"), plot_list[[name]], height = 4, width =12)
+}
+
+
+
+library(ggpubr)
+
+ggarrange(plotlist = plot_list, ncol = 2, nrow = ceiling(length(plot_list)/2))
+
+```
+
+## Violin plot
+```{r }
+library(ggpubr)
+
+GENE_tissue_plot <- my_AUZTd2UpSt_genes %>% 
+  filter(Day == "day2" | Day == "day5") %>%
+  mutate(order_x = case_when(
+    str_detect(Tissue, "Hypocotyl") ~ 1,
+    str_detect(Tissue, "RootCrown") ~ 2,
+    str_detect(Tissue, "MatureBranchedZoneTaproot") ~ 3,
+    str_detect(Tissue, "YoungBranchedZoneTaproot") ~ 4,
+    str_detect(Tissue, "AUZTaproot") ~ 5,
+    str_detect(Tissue, "AUZBasalRoots") ~ 6,
+    str_detect(Tissue, "RootTipTaproot") ~ 7,
+    str_detect(Tissue, "RootTipBasalRoots") ~ 8
+  )) %>% 
+  mutate(Tissue = reorder(Tissue, order_x)) %>% 
+  ggplot(aes(x = Tissue, y = value, fill = Genotype)) +
+  facet_grid(~Day, scales = "free_y") +
+  
+  # Violin plot
+  geom_violin(aes(fill = Genotype, color = Genotype),
+              position = position_dodge(width = 0.8), alpha = 0.5, trim = FALSE, color = NA,
+              draw_quantiles = 0.5,  # Add median line
+              linewidth = 0.5        # Outline thickness (optional)
+              ) +
+  
+  # Dots inside violins
+  geom_jitter(
+    aes(color = Genotype),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+    size = 0.8,
+    alpha = 0.4,
+    show.legend = FALSE
+  ) +
+  stat_summary(
+  fun.data = median_hilow,
+  fun.args = list(conf.int = 0.5),
+  aes(group = Genotype, color = Genotype),
+  geom = "crossbar",
+  position = position_dodge(0.8),
+  fill = NA
+  #color = "black"  # or "white"
+)+
+
+  stat_compare_means(
+  aes(x = Genotype, y = value),
+  method = "t.test",
+  comparisons = list(c("RedHawk", "Stampede")),
+  label = "p.signif",
+  inherit.aes = FALSE,
+  data = my_AUZTd2UpSt_genes %>%
+    filter(Day %in% c("day2", "day5")) %>%
+    drop_na(value),  # Just in case!
+  group.by = c("Tissue", "Day"),
+  hide.ns = TRUE
+)+
+
+  scale_color_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) +
+  scale_fill_manual(values = c("RedHawk" = "brown4", "Stampede" = "burlywood")) +
+  labs(x = NULL, y = "Normalized gene counts") +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    panel.spacing = unit(1, "lines"),
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_blank(),
+    strip.background = element_blank()
+  )
+
+GENE_tissue <- wrap_plots(GENE_tissue_plot, module_lines_color_strip,
+           nrow = 2, heights = c(1, 0.08))
+
+GENE_tissue
+
+# Save GENE_tissue plot in PDF
+ggsave(plot = GENE_tissue, filename = "2.FunctionalAnalysis/figures/AUZTd2UpSt_box.pdf", dpi = 600, units = "in", height = 4, width = 7)
+
+
+
+library(tidyplots)
+
+p <- my_AUZTd2UpSt_genes %>%
+  filter(Day %in% c("day2")) %>%
+  mutate(Tissue = factor(Tissue, levels = c(
+    "Hypocotyl",
+    "RootCrown",
+    "MatureBranchedZoneTaproot",
+    "YoungBranchedZoneTaproot",
+    "AUZTaproot",
+    "AUZBasalRoots",
+    "RootTipTaproot",
+    "RootTipBasalRoots"
+  ))) %>%
+  tidyplot(x = Tissue, y = value, color = Genotype) |>
+  
+  # Add violin with median line
+  add_violin(draw_quantiles = 0.5, alpha = 0.7) |>
+  
+  # Add jittered points (beeswarm layout)
+  add_data_points_beeswarm(alpha = 0.4, size = 0.7) |>
+  
+  # Customize colors (supply your own palette)
+  adjust_colors(new_colors = c("RedHawk" = "brown4", "Stampede" = "burlywood")) |>
+  
+  # Facet by day
+  #facet_plot(~ Day, scales = "free_y") |>
+  
+  # Adjust axes and labels
+  adjust_y_axis(title = "Normalized expression") |>
+  remove_x_axis_title() |>
+  remove_x_axis_labels() |>
+  remove_x_axis_ticks() |>
+  
+  # Styling
+  adjust_legend_position("bottom") |>
+  remove_x_axis_labels() |> 
+  remove_x_axis_title() |> 
+  remove_x_axis_ticks()
+  
+p
+
+GENE_tissue <- wrap_plots(p, module_lines_color_strip,
+           nrow = 2, heights = c(1, 0.08))
+
+GENE_tissue
+
+# Save the plot
+save_plot(GENE_tissue, "gene_expression_tidyplotviolin_by_tissue_genotype", width = 7, height = 4.5)
+ggsave(plot = GENE_tissue, filename = "2.FunctionalAnalysis/figures/AUZTd2UpSt_d2TidyViolin.pdf", dpi = 600, units = "in", height = 5, width = 9)
+
+
+```
+# old code 
+```{r}
+
+# Pairwise term similarity and enrichment map plot
+ora_test_pw <- pairwise_termsim(ora_test, method = "JC")
+
+emapplot(ora_test_pw, color = "qvalue")
+#Log fold change de_results_list_75[[2]]
+#heat_test <- heatplot(ora_test, foldChange=lfc_de_results_list[[2]]) #this was combining up and downregulated genes
+#heat_test
+
+head(lfc_de_results_list_pos[[2]])
+head(ora_test)
+head(ora_test@result)
+
+head(de_results_list_75[[2]])
+# UpSet plot for enriched terms
+upsetplot(ora_test)
+
+# Category Netplot: Linking genes with enriched pathways
+cne_test <- cnetplot(
+  ora_test, 
+  categorySize = "pvalue", 
+  color.params = list(foldChange = lfc_de_results_list[[2]])
+)
+cne_test
+
+# Save netplot as a PDF
+pdf("2.FunctionalAnalysis/figures/cnetplot_ora_test.pdf", width = 10, height = 8)  
+print(cne_test)  # Print the plot inside the PDF
+dev.off()  # Close the PDF device
+
+```
+
+## Querying OrgDb for Phaseolus vulgaris with AnnotationHub
+From:https://yulab-smu.top/biomedical-knowledge-mining-book/GOSemSim.html#gosemsim-supported-organisms 
+
+We can query OrgDb online via the AnnotationHub package
+```{r ora12}
+library(AnnotationHub)
+hub <- AnnotationHub()
+q <- query(hub, "Phaseolus vulgaris")
+q
+id <- q$ah_id[length(q)]
+Pvulgaris <- hub[[id]]
+Pvulgaris
+
+# Load required package
+library(AnnotationDbi)
+
+# See available key types (types of IDs you can extract)
+keytypes(Pvulgaris)
+
+# For example, list a few Gene IDs
+gene_ids <- head(keys(Pvulgaris, keytype = "GID"))
+print(gene_ids)
+
+# If you want to see the SYMBOLs (gene names) or other info associated with those Gene IDs:
+select(Pvulgaris, keys = gene_ids, columns = c("SYMBOL", "GENENAME"), keytype = "GID")
+
+```
+
+I'm not sure if this OrgDb is the genome version 2.1. There is "BSCHEMAVERSION: 2.1" but I don't know if this refers to the genome version.
+If this is the genome version, I could use it for future analysis that require an OrgDb.
+
+## Gene Set Enrichment Analysis (GSEA)
+https://yulab-smu.top/biomedical-knowledge-mining-book/GSEA.html
+## Biological theme comparisons
+https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-comparecluster.html
