@@ -1,0 +1,1783 @@
+---
+title: "RDGA: 4_Network_Analysis"
+author: "Viviana Ortiz"
+affiliation: "Root Haus Lab - Michigan State University"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  github_document:
+    toc: true
+---
+
+```{r options, eval = TRUE, echo = FALSE, results = 'hide'}
+
+rm(list=ls(all=TRUE)) #Removes all variables in the global environment
+
+Sys.time() # prints out the time and date you ran the code
+
+options(scipen = 999) # stops anything from being in scientific notation
+```
+
+```{r setupdir, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../")) #set wd to the project dir instead of the .Rmd file dir
+#The current working directory inside a notebook chunk is always the directory containing the notebook .Rmd file.  
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8, fig.height=8) # Set plot size to 8 inches wide and 6 inches tall
+```
+
+```{r cranmirror, eval = TRUE, echo = FALSE, include=FALSE}
+# Set a CRAN mirror (choose one appropriate for your location)
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+```
+
+
+Tutorial from:https://alexslemonade.github.io/refinebio-examples/04-advanced-topics/network-analysis_rnaseq_01_wgcna.html
+
+
+# Purpose of this analysis
+
+In this example, we use weighted gene co-expression network analysis (WGCNA) to identify co-expressed gene modules [@Langfelder2008]. 
+WGCNA uses a series of correlations to identify sets of genes that are expressed together in your data set. 
+This is a fairly intuitive approach to gene network analysis which can aid in interpretation of microarray & RNA-seq data. 
+
+As output, WGCNA gives groups of co-expressed genes as well as an eigengene x sample matrix (where the values for each eigengene represent the summarized expression for a group of co-expressed genes) [@Langfelder2007]. 
+This eigengene x sample data can, in many instances, be used as you would the original gene expression values. 
+In this example, we use eigengene x sample data to identify differentially expressed modules between our treatment and control group
+
+This method does require some computing power, but can still be run locally (on your own computer) for most refine.bio datasets.
+As with many clustering and network methods, there are some parameters that may need tweaking. 
+
+
+```{r}
+
+# Define the file path to the plots directory
+fig_dir <- "3.NetworkAnalysis/figures/"
+
+# Create the plots folder if it doesn't exist
+if (!dir.exists(fig_dir)) {
+  dir.create(fig_dir)
+}
+
+# Define the file path to the results directory
+out_dir <- "3.NetworkAnalysis/output/"
+# Create the output folder if it doesn't exist
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir)
+}
+```
+
+
+### Load R data from the previous script: 3_Functional_Analysis.RData
+
+```{r }
+# Create a temporary environment to load the data into
+tmp_env <- new.env()
+
+# Load the RData into that environment
+load("2.FunctionalAnalysis/3_Functional_Analysis.RData", envir = tmp_env)
+
+# List objects inside the RData
+ls(tmp_env)
+
+# Access only what you need
+normalized_counts_roots <- tmp_env$normalized_counts_roots
+sampledataord_roots <- tmp_env$sampledataord_roots
+normalized_counts_roots_t <- tmp_env$normalized_counts_roots_t
+sampledataord_roots <- tmp_env$sampledataord_roots
+my_pal_RDGA <- tmp_env$my_pal_RDGA
+day_palette <- tmp_env$day_palette
+day_palette_leaf <- tmp_env$day_palette_leaf
+
+#load annotated genes 
+all_pv_genes_ann <- tmp_env$all_pv_genes_ann
+all_pv_genes_ann_gokeggpath <- tmp_env$all_pv_genes_ann_gokeggpath
+
+
+#this part just for reference, to see where this data came from
+#library(DESeq2)
+#dds_roots_norm <- vst(dds_roots)
+
+# Retrieve the normalized data from the `DESeqDataSet`
+#normalized_counts_roots <- assay(dds_roots_norm) %>%
+ # t() # Transpose this data
+
+
+normalized_counts_roots[1:5,1:3]
+dim(normalized_counts_roots)
+range(normalized_counts_roots)#2.673161 14.663412
+
+#Transpose normalized counts
+#normalized_counts_roots_t  <- t(normalized_counts_roots)
+head(normalized_counts_roots_t)
+#
+colnames(sampledataord_roots)
+head(sampledataord_roots)
+
+# Check if column names match the Sample_ID values exactly and in the same order
+all(colnames(normalized_counts_roots_t) == sampledataord_roots$sample)
+
+# Compare elements one by one
+which(colnames(normalized_counts_roots_t) != sampledataord_roots$sample)
+
+```
+
+# Identifying co-expression gene modules with WGCNA - RNA-seq
+
+## Install libraries
+
+See our Getting Started page with [instructions for package installation](https://alexslemonade.github.io/refinebio-examples/01-getting-started/getting-started.html#what-you-need-to-install) for a list of the other software you will need, as well as more tips and resources.
+
+We will be using `DESeq2` to normalize and transform our RNA-seq data before running WGCNA, so we will need to install that [@Love2014].
+
+Of course, we will need the `WGCNA` package [@Langfelder2008].
+But `WGCNA` also requires a package called `impute` that it sometimes has trouble installing so we recommend installing that first [@Hastie2020]. 
+
+For plotting purposes will be creating a `sina` plot and heatmaps which we will need a `ggplot2` companion package for, called `ggforce` as well as the `ComplexHeatmap` package [@Gu2020].  
+
+```{r}
+if (!("DESeq2" %in% installed.packages())) {
+  # Install this package if it isn't installed yet
+  BiocManager::install("DESeq2", update = FALSE)
+}
+
+if (!("impute" %in% installed.packages())) {
+  # Install this package if it isn't installed yet
+  BiocManager::install("impute")
+}
+
+if (!("WGCNA" %in% installed.packages())) {
+  # Install this package if it isn't installed yet
+  install.packages("WGCNA")
+}
+
+if (!("ggforce" %in% installed.packages())) {
+  # Install this package if it isn't installed yet
+  install.packages("ggforce")
+}
+
+if (!("ComplexHeatmap" %in% installed.packages())) {
+  # Install this package if it isn't installed yet
+  install.packages("ComplexHeatmap")
+}
+
+#install.packages("languageserver") #For VSCode r extension
+```
+
+## Load libraries
+
+```{r message=FALSE}
+library(tidyverse)
+# Attach the DESeq2 library
+library(DESeq2)
+#vignette('DESeq2')
+
+# We will need this so we can use the pipe: %>%
+library(magrittr)
+
+# We'll need this for finding gene modules
+library(WGCNA)
+
+# We'll be making some plots
+library(ggplot2)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(graphlayouts)
+library(ggforce)
+library(networkdata)
+```
+
+## Determine parameters for WGCNA
+
+To identify which genes are in the same modules, WGCNA first creates a weighted network to define which genes are near each other. 
+The measure of "adjacency" it uses is based on the correlation matrix, but requires the definition of a threshold value, which in turn depends on a "power" parameter that defines the exponent used when transforming the correlation values. 
+The choice of power parameter will affect the number of modules identified, and the WGCNA modules provides the  `pickSoftThreshold()` function to help identify good choices for this parameter. 
+
+# Run with only roots normalized counts
+```{r}
+sft <- pickSoftThreshold(normalized_counts_roots,
+  dataIsExpr = TRUE,
+  corFnc = cor,
+  networkType = "signed"
+)
+```
+This `sft` object has a lot of information, we will want to plot some of it to figure out what our `power` soft-threshold should be. 
+We have to first calculate a measure of the model fit, the signed $R^2$, and make that a new variable. 
+
+```{r}
+sft_df <- data.frame(sft$fitIndices) %>%
+  dplyr::mutate(model_fit = -sign(slope) * SFT.R.sq)
+```
+
+Now, let's plot the model fitting by the `power` soft threshold so we can decide on a soft-threshold for power. 
+
+```{r}
+sft_plot <- ggplot(sft_df, aes(x = Power, y = model_fit, label = Power)) +
+  # Plot the points
+  geom_point() +
+  # We'll put the Power labels slightly above the data points
+  geom_text(nudge_y = 0.1) +
+  # We will plot what WGCNA recommends as an R^2 cutoff
+  geom_hline(yintercept = 0.80, col = "red") +
+  # Just in case our values are low, we want to make sure we can still see the 0.80 level
+  ylim(c(min(sft_df$model_fit), 1.05)) +
+  # We can add more sensible labels for our axis
+  xlab("Soft Threshold (power)") +
+  ylab("Scale Free Topology Model Fit, signed R^2") +
+  ggtitle("Scale independence") +
+  # This adds some nicer aesthetics to our plot
+  theme_classic()
+
+sft_plot 
+
+
+#output_file <- file.path(fig_dir, "sft_plot.pdf")
+#ggsave(plot = sft_plot , output_file, dpi = 600, units = "in", height = 4, width = 6) 
+
+```
+
+Using this plot we can decide on a power parameter. 
+WGCNA's authors recommend using a `power` that has an signed $R^2$ above `0.80`, otherwise they warn your results may be too noisy to be meaningful. 
+
+If you have multiple power values with signed $R^2$ above `0.80`, then picking the one at an inflection point, in other words where the $R^2$ values seem to have reached their saturation [@Zhang2005].
+You want to a `power` that gives you a big enough $R^2$ but is not excessively large.
+
+So using the plot above, going with a power soft-threshold of `14`!
+
+If you find you have all very low $R^2$ values this may be because there are too many genes with low expression values that are cluttering up the calculations. 
+You can try returning to [gene filtering step](#define-a-minimum-counts-cutoff) and choosing a more stringent cutoff (you'll then need to re-run the transformation and subsequent steps to remake this plot to see if that helped). 
+
+## Run WGCNA!
+
+We will use the `blockwiseModules()` function to find gene co-expression modules in WGCNA, using `14` for the `power` argument like we determined above. 
+
+This next step takes some time to run.
+The `blockwise` part of the `blockwiseModules()` function name refers to that these calculations will be done on chunks of your data at a time to help with conserving computing resources.
+
+Here we are using the default `maxBlockSize`, 5000 but, you may want to adjust the `maxBlockSize` argument depending on your computer's memory.
+The authors of WGCNA recommend running [the largest block your computer can handle](https://peterlangfelder.com/2018/11/25/blockwise-network-analysis-of-large-data/) and they provide some approximations as to GB of memory of a laptop and what `maxBlockSize` it should be able to handle:
+
+> • If the reader has access to a large workstation with more than 4 GB of memory, the parameter maxBlockSize
+can be increased. A 16GB workstation should handle up to 20000 probes; a 32GB workstation should handle
+perhaps 30000. A 4GB standard desktop or a laptop may handle up to 8000-10000 probes, depending on
+operating system and other running programs.
+
+[@Langfelder2016]
+
+```{r}
+dim(normalized_counts_roots) # To see how many genes we have. 22883, I will use this as maxBlockSize, so I have all genes in one block
+```
+
+```{r}
+bwnet <- blockwiseModules(normalized_counts_roots,
+  maxBlockSize = 22883, # What size chunks (how many genes) the calculations should be run in
+  TOMType = "signed", # topological overlap matrix
+  power = 14, # soft threshold for network construction
+  numericLabels = TRUE, # Let's use numbers instead of colors for module labels
+  randomSeed = 1234, # there's some randomness associated with this calculation
+  # so we should set a seed
+)
+```
+
+## Write main WGCNA results object to file
+
+We will save our whole results object to an RDS file in case we want to return to our original WGCNA results.
+
+```{r}
+#Save bwnet R object
+readr::write_rds(bwnet,
+  file = file.path(out_dir, "bwnet_allroots.RDS")
+)
+```
+
+# Start here if loading bwnet R object
+
+```{r}
+# load bwnet R object
+bwnet <- readr::read_rds("output_dir/bwnet_allroots.RDS")
+```
+
+
+## Module identification using mergeCutH 0.25
+https://bioinformaticsworkbook.org/tutorials/wgcna.html#gsc.tab=0
+```{r}
+picked_power = 14
+temp_cor <- cor       
+cor <- WGCNA::cor         # Force it to use WGCNA cor function (fix a namespace conflict issue)
+netwk <- blockwiseModules(normalized_counts_roots,                # <= input here
+                          maxBlockSize = 22883, # What size chunks (how many genes) the calculations should be run in
+
+                          # == Adjacency Function ==
+                          power = picked_power,                # <= power here
+                          networkType = "signed",
+
+                          # == Tree and Block Options ==
+                          deepSplit = 2,
+                          pamRespectsDendro = F,
+                          # detectCutHeight = 0.75,
+                          minModuleSize = 30,
+                          maxBlockSize = 4000,
+
+                          # == Module Adjustments ==
+                          reassignThreshold = 0,
+                          mergeCutHeight = 0.25,
+
+                          # == TOM == Archive the run results in TOM file (saves time)
+                          saveTOMs = T,
+                          saveTOMFileBase = "ER",
+
+                          # == Output Options
+                          numericLabels = T,
+                          randomSeed = 1234,
+                          verbose = 3)
+```
+
+
+
+Let's take a look at the modules WGCNA identified.
+```{r}
+plot(bwnet$dendrograms[[1]])
+
+# Convert labels to colors for plotting
+mergedColors = labels2colors(bwnet$colors)
+# Plot the dendrogram and the module colors underneath
+# Start the graphics device
+#png(paste0(fig_dir, "dendro_allgenes.png"), res = 600, height = 4, width = 6, units = "in")
+pdf(file = file.path(fig_dir, "dendro_allgenes.pdf"), width = 6, height = 4)
+
+# Create the plot
+dendro_allgenes <- plotDendroAndColors(
+  bwnet$dendrograms[[1]],
+  mergedColors[bwnet$blockGenes[[1]]],
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05 )
+
+# Close the graphics device
+dev.off()
+
+```
+
+
+The `TOMtype` argument specifies what kind of topological overlap matrix (TOM) should be used to make gene modules.
+You can safely assume for most situations a `signed` network represents what you want -- we want WGCNA to pay attention to directionality. 
+However if you suspect you may benefit from an `unsigned` network, where positive/negative is ignored see [this article](https://peterlangfelder.com/2018/11/25/signed-or-unsigned-which-network-type-is-preferable/) to help you figure that out [@Langfelder2018].
+
+There are a lot of other settings you can tweak -- look at `?blockwiseModules` help page as well as the [WGCNA tutorial](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/) [@Langfelder2016].
+
+
+
+## Explore our WGCNA results
+
+The `bwnet`  object has many parts, storing a lot of information. 
+We can pull out the parts we are most interested in and may want to use use for plotting. 
+
+In `bwnet` we have a data frame of eigengene module data for each sample in the `MEs` slot. 
+These represent the collapsed, combined, and normalized expression of the genes that make up each module. 
+
+```{r}
+module_eigengenes <- bwnet$MEs
+
+# Print out a preview
+head(module_eigengenes)
+```
+
+## Which modules have biggest differences across treatment groups?
+
+We can also see if our eigengenes relate to our metadata labels. 
+First we double check that our samples are still in order.
+
+```{r}
+all(rownames(module_eigengenes) == as.character(sampledataord_roots$sample))
+which(rownames(module_eigengenes) != as.character(sampledataord_roots$sample))
+```
+
+```{r}
+sampledataord_roots$Day <- factor(sampledataord_roots$Day)
+```
+
+## Relate Module (cluster) Assignments to Treatment Groups
+
+```{r}
+# Module names using colors
+module_df <- data.frame(
+  gene_id = names(bwnet$colors),
+  colors = labels2colors(bwnet$colors)
+)
+
+#Module names using numbers
+module_df <- data.frame(
+  gene_id = names(bwnet$colors),
+  colors = bwnet$colors
+)
+
+module_df[1:5,]
+
+
+#write_delim(module_df,
+#           file = paste0(out_dir,"gene_modules_numbers.txt"),
+#           delim = "\t")
+
+table(module_df$colors) #28 modules (0-27), number of genes in each module
+# 0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15 
+#9426 3337 2348 2172 1523  813  728  400  381  269  211  194  178  142  112  108 
+#  16   17   18   19   20   21   22   23   24   25   26   27 
+#  97   74   71   45   42   33   33   32   32   29   27   26 
+unique(module_df$colors)
+#[1] 11  2  6  1  0  8  3  5 10  4  7 18 12 26 13 24 22 17  9 16 14 15 20 19 23
+#[26] 25 27 21
+
+bwnet$MEs
+
+```
+
+
+```{r}
+normalized_counts[,1:2]
+normalized_counts_roots[,1:2]
+```
+
+
+```{r}
+#mergedColors = labels2colors(bwnet$colors) 
+head(bwnet$MEs)
+head(MEs0_roots)
+## Get Module Eigengenes per cluster, only roots
+MEs0_roots <- moduleEigengenes(normalized_counts_roots, bwnet$colors)$eigengenes
+# Reorder modules so similar modules are next to each other
+MEs0_roots <- orderMEs(MEs0_roots)
+module_order = names(MEs0_roots) %>% gsub("ME","", .)
+
+# Add treatment names
+colnames(sampledataord_roots)
+sampledataord_roots$Sample_ID
+
+MEs0_roots$treatment = sampledataord_roots$Sample_ID
+head(MEs0_roots)
+str(MEs0_roots)
+```
+
+```{r}
+# tidy & plot data
+mME = MEs0_roots %>%
+  pivot_longer(-treatment) %>%
+  mutate(
+    name = gsub("ME", "", name),
+    name = factor(name, levels = module_order)
+  )
+mME
+
+corME  <- mME %>% ggplot(., aes(x=treatment, y=name, fill=value)) +
+  geom_tile() +
+  theme_bw() +
+  scale_fill_gradient2(
+    low = "blue",
+    high = "red",
+    mid = "white",
+    midpoint = 0,
+    limit = c(-0.4,0.4)) +
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  labs(title = "Module-trait Relationships", y = "Module", fill="corr")
+
+#save plot
+corME
+
+```
+
+
+## Sample data for Heatmap 
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+
+# Data frame with column annotations.
+sampledataord_roots$Sample_ID <- factor(sampledataord_roots$Sample_ID)
+sampledataord_roots$Day <- factor(sampledataord_roots$Day)
+sampledataord_roots$Genotype <- factor(sampledataord_roots$Genotype)
+sampledataord_roots$Tissue <- factor(sampledataord_roots$Tissue)
+head(sampledataord_roots)
+
+str(MEs0_roots)
+head(MEs0_roots)
+
+MEs0_roots_t <- t(MEs0_roots[,1:28])
+rownames(sampledataord_roots) <- colnames(MEs0_roots_t)
+
+str(MEs0_roots_t)
+head(MEs0_roots_t)
+
+
+# Scale the data
+MEs0_roots_tscaled <- scale(MEs0_roots_t)
+
+
+#subset sampledataord_roots to only include columns:  Day, Genotype, Tissue
+sampledataord_roots_ann <- sampledataord_roots[,c("Day","Genotype","Tissue")]
+
+levels(sampledataord_roots_ann$Day)
+levels(sampledataord_roots_ann$Genotype)
+levels(sampledataord_roots_ann$Tissue)
+
+# Define the tissues
+tissues <- levels(sampledataord_roots_ann$Tissue)
+
+root_tissue_labels_abrev <- c("HYP", "RCR", "MBZ", "YBZ", 
+                   "AUZT", "AUZB", "RTT", "RTB")
+
+tissues_ordered  <-  c(
+     "Hypocotyl",
+     "RootCrown",
+     "MatureBranchedZoneTaproot",
+     "YoungBranchedZoneTaproot",
+     "AUZTaproot",
+     "AUZBasalRoots",
+     "RootTipTaproot",
+     "RootTipBasalRoots")
+
+# Create a named list where each tissue goes with a color
+tissue_colors <- setNames(my_pal_RDGA[1:8], tissues_ordered)
+
+
+# Create a named list where each condition goes with a color
+sampledataord_roots_ann_colors <- list( # list of colors for the annotations
+  Day = c("day2" = "grey70", 
+          "day5" = "black"), 
+  Genotype = c("RedHawk" = "brown4", 
+               "Stampede" = "burlywood"),
+  Tissue = tissue_colors)
+
+
+# Load the ArchR package
+library(ArchR)
+paletteLength <- 50
+myColor3 <- colorRampPalette(c("blue", "white", "red"))(paletteLength)
+
+  
+myBreaks <- c(seq(min(MEs0_roots_tscaled), 0, length.out=ceiling(paletteLength/2) + 1), 
+              seq(max(MEs0_roots_tscaled)/paletteLength, max(MEs0_roots_tscaled), length.out=floor(paletteLength/2)))
+
+
+```
+## Heatmap of module eigengenes
+```{r}
+
+#z-score
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+MEs0_roots_tnorm <- t(apply(MEs0_roots_t, 1, cal_z_score))
+
+library(pheatmap)
+library(RColorBrewer)
+
+mod_all_heatmap_zscore <- pheatmap(MEs0_roots_tnorm,
+         color = myColor3,
+         breaks = myBreaks,
+         cluster_rows = TRUE,
+         cluster_cols = T,
+         # add row gap
+         row_gap = 4,
+         border_color = "black",
+         #main = "Module eigengenes",
+         annotation_col = sampledataord_roots_ann,
+         #annotation_row = metadata_roots_ann,
+         annotation_colors = sampledataord_roots_ann_colors,
+         gaps_col = gap_geno,
+         show_colnames = F,
+         show_rownames = T)
+mod_all_heatmap_zscore
+ggsave(plot = mod_all_heatmap_zscore, paste0(fig_dir, "heatmapZscore_module_allroots.pdf"), dpi = 600, units = "in", height = 8, width = 8) 
+ggsave(plot = mod_all_heatmap_zscore, paste0(fig_dir, "heatmapZscore_module_allroots.svg"), dpi = 300, units = "in", height = 8, width = 8) #Error: vector memory exhausted (limit reached?)
+ggsave(plot = mod_all_heatmap_zscore, paste0(fig_dir, "heatmapZscore_module_allroots.png"), dpi = 600, units = "in", height = 8, width = 8) 
+
+#Transposed so that rows are samples and columns are modules
+mod_all_heatmap_zscore_h <- pheatmap(t(MEs0_roots_tnorm),  # Transpose here
+         color = myColor3,
+         breaks = myBreaks,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         row_gap = 4,
+         border_color = NA,
+         annotation_row = sampledataord_roots_ann,
+         annotation_colors = sampledataord_roots_ann_colors,
+         gaps_col = gap_geno,
+         show_colnames = TRUE,     # Now these are the module names (was rows)
+         show_rownames = FALSE,
+         angle_col = 90)    
+mod_all_heatmap_zscore
+ggsave(plot = mod_all_heatmap_zscore_h, paste0(fig_dir, "heatmapZscore_module_allroots_horiz_sm.pdf"), dpi = 600, units = "in", height = 4, width = 8) 
+#ggsave(plot = mod_all_heatmap_zscore_h, paste0(fig_dir, "heatmapZscore_module_allroots_horiz_sm.svg"), dpi = 300, units = "in", height = 4, width = 8) #Error: vector memory exhausted (limit reached?)
+ggsave(plot = mod_all_heatmap_zscore_h, paste0(fig_dir, "heatmapZscore_module_allroots_horiz_sm.png"), dpi = 600, units = "in", height = 4, width = 8)
+```
+
+
+## Module QC 
+
+Modified from: https://github.com/cxli233/SimpleTidy_GeneCoEx#reorder-rows-and-columns
+
+### Summary statistics for each module and condition and look at their expression pattern using mean
+```{r} 
+head(MEs0_roots) #Module eigengenes
+#Add independent columns for tissue, day and genotype
+ME_sampledata <- MEs0_roots %>%
+  mutate(
+    Tissue = sampledataord_roots$Tissue,
+    Day = sampledataord_roots$Day,
+    Genotype = sampledataord_roots$Genotype
+  )
+head(ME_sampledata)
+
+ME_sampledata_long <- ME_sampledata %>%
+  pivot_longer(cols = starts_with("ME"), names_to = "Module", values_to = "Eigenvalue")
+
+head(ME_sampledata_long)
+
+#save the environment until now
+#save.image(file = "3.NetworkAnalysis/4_RDGA_NetworkAnalysis.RData")
+load("3.NetworkAnalysis/4_RDGA_NetworkAnalysis.RData")
+
+
+#Mean eigenvalues for each module and condition
+library(dplyr)
+modules_mean_exp_long <- ME_sampledata_long %>% 
+  dplyr::group_by(Module, Tissue, Day, Genotype) %>% 
+  dplyr::summarise(mean_ME = mean(Eigenvalue)) %>% 
+  ungroup()
+
+head(modules_mean_exp_long)
+
+# Save the mean eigenvalues for each module and condition
+write.csv(modules_mean_exp_long, file = paste0(out_dir, "modules_mean_exp_long.csv"), row.names = FALSE)
+
+#At which tissue, day and genotype is each module most highly expressed
+module_peak_exp <- modules_mean_exp_long %>% 
+  group_by(Module) %>% 
+  slice_max(order_by = mean_ME, n = 1) 
+  
+module_peak_exp_ordered <- module_peak_exp %>% 
+  ungroup() %>% 
+  arrange(Tissue, Day, Genotype, desc(mean_ME))
+
+module_peak_exp_ordered
+
+module_peak_exp_tissueord <- module_peak_exp %>%
+  mutate(Tissue = factor(Tissue, levels = tissues_ordered)) %>%  # set custom order
+  arrange(Tissue, Day, Genotype, desc(mean_ME))
+module_peak_exp_tissueord 
+
+
+write.csv(module_peak_exp_ordered, file = paste0(out_dir, "module_peak_exp_ordered.csv"))
+write.csv(module_peak_exp_tissueord, file = paste0(out_dir, "module_peak_exp_tissueord.csv"))
+
+#Save with flextable
+library(flextable)
+module_peak_exp_ordered_flex <- flextable(module_peak_exp_ordered)
+module_peak_exp_ordered_flex <- flextable(module_peak_exp_ordered) %>%
+  set_table_properties(width = .5, layout = "autofit") %>%
+  align(align = "center", part = "all") %>%
+  set_header_labels(
+    Tissue = "Tissue",
+    Day = "Day",
+    Genotype = "Genotype",
+    Module = "Module",
+    mean_ME = "Mean Eigenvalue"
+  ) %>%
+  set_caption("At which tissue, day and genotype is each module most highly expressed")
+
+#Save to a file
+#save_as_html(module_peak_exp_ordered_flex, path = "output_wgcna/module_peak_exp_ordered_flex.html")
+
+#Save to a doc
+#save_as_docx(module_peak_exp_ordered_flex, path = "output_wgcna/module_peak_exp_ordered_flex.docx")
+
+
+# Top 3 highest mean eigengene expressions per module
+top_conditions <- modules_mean_exp_long %>%
+  group_by(Module) %>%
+  slice_max(order_by = mean_ME, n = 3)
+
+# Save the top conditions for each module
+write.csv(top_conditions, file = paste0(out_dir, "top_conditions_per_module.csv"), row.names = FALSE)
+
+# Top 3 lowest mean eigengene expressions per module
+bottom_conditions <- modules_mean_exp_long %>%
+  group_by(Module) %>%
+  slice_min(order_by = mean_ME, n = 3)
+# Save the bottom conditions for each module
+write.csv(bottom_conditions, file = paste0(out_dir, "bottom_conditions_per_module.csv"), row.names = FALSE)
+  
+# Top modules for each condition
+top_modules_per_condition <- modules_mean_exp_long %>%
+  group_by(Tissue, Day, Genotype) %>%
+  slice_max(order_by = mean_ME, n = 3)
+# Save the top modules for each condition
+write.csv(top_modules_per_condition, file = paste0(out_dir, "top_modules_per_condition.csv"), row.names = FALSE)
+
+```
+
+
+## Module eigengenes associated with groups
+# Add the module assignment to the metadata 
+Using linear modeling via limma on module eigengenes is a very good and statistically sound approach to:
+
+Formally test which modules are associated with a condition (e.g., Day, Genotype, or Tissue),
+Control for multiple testing, and
+Quantify effect size and significance of associations.
+```{r}
+library(limma)
+library(tibble)
+library(dplyr)
+
+head(MEs0_roots)
+head(bwnet$MEs)
+
+# 1. Make sure rownames of metadata match the rows of module eigengenes
+# (MEs0_roots rows = samples)
+all(rownames(MEs0_roots) == rownames(sampledataord_roots))  # Should be TRUE
+
+# 2. Create design matrix for multi-factor model
+design <- model.matrix(~ 0 + Tissue + Day + Genotype, data = sampledataord_roots)
+colnames(design) <- make.names(colnames(design))  # Clean names for limma
+
+# 3. Transpose eigengenes to genes (rows) × samples (columns)
+ME_matrix <- t(MEs0_roots)  # Now rows are modules, columns are samples
+# Remove non-numeric columns (like treatment, Tissue, Day, Genotype)
+ME_matrix <- MEs0_roots %>%
+  dplyr::select(starts_with("ME")) %>%
+  as.matrix() %>%
+  t()  # transpose to modules x samples
+
+
+# 4. Fit linear model
+fit <- lmFit(ME_matrix, design)
+
+# 5. Define contrasts if needed (e.g., comparing day5 vs day2)
+# Alternatively, skip this step if you want full coefficient outputs
+# contrast.matrix <- makeContrasts(Day5vsDay2 = Dayday5 - Dayday2, levels = design)
+# fit2 <- contrasts.fit(fit, contrast.matrix)
+
+fit2 <- eBayes(fit)  # Use full model without contrast if you're testing all terms
+
+# 6. Extract results per coefficient (e.g., GenotypeStampede, Dayday5, each Tissue)
+results_list <- list()
+for (coef_name in colnames(fit2$coefficients)) {
+  top <- topTable(fit2, coef = coef_name, number = Inf) %>%
+    rownames_to_column("Module") %>%
+    mutate(Contrast = coef_name)
+  results_list[[coef_name]] <- top
+}
+
+# 7. Combine all results
+module_trait_lm_results <- bind_rows(results_list)
+
+# 8. Save or inspect
+head(module_trait_lm_results)
+write.csv(module_trait_lm_results, file = paste0(out_dir, "module_trait_lm_results.csv"), row.names = FALSE)
+
+```
+
+## Modeling association with each condition combination (Sample_ID)
+Test the association between each WGCNA module eigengene and the specific combination of Tissue, Genotype, and Day (your Sample_ID), then you should model Sample_ID as a single factor.
+
+This allows you to treat each unique experimental condition as its own group
+```{r}
+# 1. Design matrix using Sample_ID as a factor
+design <- model.matrix(~ 0 + Sample_ID, data = sampledataord_roots)
+colnames(design) <- make.names(colnames(design))  # Clean names
+
+# 2. Prepare eigengene matrix (modules × samples)
+eigengene_matrix <- MEs0_roots %>%
+  dplyr::select(starts_with("ME")) %>%
+  as.matrix() %>%
+  t()
+
+# 3. Fit linear model with limma
+library(limma)
+fit <- lmFit(eigengene_matrix, design)
+fit <- eBayes(fit)
+
+# 4. Extract statistics for all Sample_IDs
+results_list <- lapply(colnames(design), function(sample) {
+  topTable(fit, coef = sample, number = Inf) %>%
+    tibble::rownames_to_column("Module") %>%
+    dplyr::mutate(Sample_ID = sample)
+})
+results_all <- dplyr::bind_rows(results_list)
+
+# 5. View or save
+head(results_all)
+
+# 6. Save the results
+write.csv(results_all, file = paste0(out_dir, "module_sampleid_lm_results.csv"), row.names = FALSE)
+
+#Top condition per module
+
+top_conditions_per_module <- results_all %>%
+  group_by(Module) %>%
+  slice_max(order_by = logFC, n = 3)  # or slice_min() for most negative
+
+# Save the top conditions per module
+write.csv(top_conditions_per_module, file = paste0(out_dir, "top_conditions_per_module_sampleid.csv"), row.names = FALSE)
+```
+
+## Specific module-condition associations
+Compute z-scores of module eigengenes across conditions and identify highly specific module-condition associations, with emphasis on the 3 defined tissue clusters.
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Use your existing ME_sampledata_long
+# Columns: Module, Tissue, Day, Genotype, Eigenvalue
+
+# 1. Z-score calculation across modules
+ME_zscore <- ME_sampledata_long %>%
+  group_by(Module) %>%
+  mutate(zscore = scale(Eigenvalue)) %>%
+  ungroup()
+
+# 2. Define tissue clusters
+cluster1_tissues <- c("Hypocotyl", "RootCrown")  # day 5 only
+cluster2_tissues <- c("MatureBranchedZoneTaproot", "YoungBranchedZoneTaproot", "AUZTaproot", "AUZBasalRoots")
+cluster3_tissues <- c("RootTipTaproot", "RootTipBasalRoots")
+cluster4_tissues <- c("RootCrown")  # day 2 only
+
+# 3. Assign Cluster based on tissue and day
+ME_zscore <- ME_zscore %>%
+  mutate(
+    Cluster = case_when(
+      Tissue %in% cluster1_tissues & Day == "day5" ~ "Cluster1",
+      Tissue %in% cluster2_tissues ~ "Cluster2",
+      Tissue %in% cluster3_tissues ~ "Cluster3",
+      Tissue %in% cluster4_tissues & Day == "day2" ~ "Cluster4",
+      TRUE ~ "Other"
+    )
+  )
+
+# 4. Filter for strong condition-specific module expression
+specific_modules <- ME_zscore %>%
+  filter(abs(zscore) > 1.5)  # Adjust threshold if needed
+
+# 5. Optional: save or inspect
+write.csv(specific_modules, file = paste0(out_dir, "ME_zscore_gt1p5_cluster.csv"), row.names = FALSE)
+
+```
+
+```{r}
+library(dplyr)
+
+# Function to get modules passing all z-score thresholds within each group (tissue or cluster)
+get_consistent_modules <- function(df, group_var, z_threshold) {
+  df %>%
+    group_by(Module, !!sym(group_var)) %>%
+    summarise(all_above = all(zscore > z_threshold), .groups = "drop") %>%
+    filter(all_above) %>%
+    select(Module, !!sym(group_var)) %>%
+    mutate(z_threshold = z_threshold)
+}
+
+# Set z-score thresholds
+z_thresholds <- c(1, 1.5, 2, 2.5)
+
+# Initialize empty results
+mod_tissue_filtered <- data.frame()
+mod_cluster_filtered <- data.frame()
+
+# Loop over thresholds to collect qualifying modules
+for (z in z_thresholds) {
+  # Filter by tissue
+  temp_tissue <- get_consistent_modules(ME_zscore, "Tissue", z)
+  mod_tissue_filtered <- bind_rows(mod_tissue_filtered, temp_tissue)
+
+  # Filter by cluster
+  temp_cluster <- get_consistent_modules(ME_zscore, "Cluster", z)
+  mod_cluster_filtered <- bind_rows(mod_cluster_filtered, temp_cluster)
+}
+
+# Save the filtered results
+write.csv(mod_tissue_filtered, file = paste0(out_dir, "ME_zscore_threshold_tissue.csv"), row.names = FALSE)
+write.csv(mod_cluster_filtered, file = paste0(out_dir,"ME_zscore_threshold_cluster.csv"), row.names = FALSE)
+
+```
+
+```{r}
+library(dplyr)
+
+# Step 1: Calculate z-scores for each module
+ME_zscore <- ME_sampledata_long %>%
+  group_by(Module) %>%
+  mutate(zscore = scale(Eigenvalue)) %>%
+  ungroup()
+
+# Step 2: Define tissue groups for clusters
+cluster1_tissues <- c("Hypocotyl", "RootCrown")
+cluster2_tissues <- c("MatureBranchedZoneTaproot", "YoungBranchedZoneTaproot", "AUZTaproot", "AUZBasalRoots")
+cluster3_tissues <- c("RootTipTaproot", "RootTipBasalRoots")
+cluster4_tissues <- c("RootCrown")  # day2 only
+
+# Step 3: Annotate clusters
+ME_zscore <- ME_zscore %>%
+  mutate(
+    Cluster = case_when(
+      Tissue %in% cluster1_tissues & Day == "day5" ~ "Cluster1",
+      Tissue %in% cluster2_tissues & Genotype == "RedHawk" ~ "Cluster2_Rh",
+      Tissue %in% cluster2_tissues & Genotype == "Stampede" ~ "Cluster2_St",
+      Tissue %in% cluster3_tissues ~ "Cluster3",
+      Tissue %in% cluster4_tissues & Day == "day2" ~ "Cluster4",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Cluster))  # remove unmatched
+
+# Step 4: Function to filter modules based on z-score threshold and proportion of samples
+filter_modules_by_cluster <- function(df, z_thresh = 1.5, min_prop = 0.6) {
+  df %>%
+    group_by(Module, Cluster) %>%
+    summarise(
+      n_total = n(),
+      n_passing = sum(zscore > z_thresh),
+      prop_passing = n_passing / n_total,
+      .groups = "drop"
+    ) %>%
+    filter(prop_passing >= min_prop)
+}
+
+# Step 5: Apply filter for desired thresholds
+modules_60 <- filter_modules_by_cluster(ME_zscore, z_thresh = 1, min_prop = 0.6)
+modules_80 <- filter_modules_by_cluster(ME_zscore, z_thresh = 1, min_prop = 0.8)
+modules_90 <- filter_modules_by_cluster(ME_zscore, z_thresh = 1, min_prop = 0.9)
+
+# Step 6: Save or inspect
+write.csv(modules_60, file = paste0(out_dir, "modules_clust2bygeno_z1_60perc.csv"), row.names = FALSE)
+write.csv(modules_80, file = paste0(out_dir, "modules_clust2bygeno_z1_80perc.csv"), row.names = FALSE)
+write.csv(modules_90, file = paste0(out_dir, "modules_clust2bygeno_z1_90perc.csv"), row.names = FALSE)
+
+
+```
+
+
+## Data frame with all information: gene id, module, eigenvalue, tissue, day, genotype
+```{r}
+module_df[1:5,]
+
+#Transpose normalized counts
+head(normalized_counts_roots_t)
+colnames(normalized_counts_roots_t) <- sampledataord_roots$Sample_ID
+
+allmod_df = data.frame(normalized_counts_roots_t) %>%
+  mutate(
+    gene_id = row.names(.)
+  ) %>%
+  pivot_longer(-gene_id) %>%
+  mutate(
+    module = module_df[gene_id,]$colors
+  )
+head(allmod_df)
+#module column as factor
+allmod_df$module <- factor(allmod_df$module)
+
+#Levels of name column 
+unique(allmod_df$name) #the step above added ".1" and ".2" to the names
+allmod_df$name <- gsub("\\.1", "", allmod_df$name)#Remove ".1" and ".2" from the names
+allmod_df$name <- gsub("\\.2", "", allmod_df$name)
+unique(allmod_df$name)
+
+#Add tissue, day and genotype columns
+head(sampledataord_roots)
+str(sampledataord_roots)
+allmod_df <- allmod_df %>%
+  mutate(
+    Tissue = sampledataord_roots$Tissue[match(name, sampledataord_roots$Sample_ID)],
+    Day = sampledataord_roots$Day[match(name, sampledataord_roots$Sample_ID)],
+    Genotype = sampledataord_roots$Genotype[match(name, sampledataord_roots$Sample_ID)]   
+  )
+head(allmod_df)
+# Save the allmod_df data frame
+#write.csv(allmod_df, file = paste0(out_dir, "allmod_df.csv"), row.names = FALSE)
+```
+
+## Hub genes for each module 
+Create separate objects for each module, using a for loop and the assign() function to dynamically create variable names.
+
+This code will create separate genes_modX, expr_modX, TOM_modX, and edge_list_modX objects for each module in modules_of_interest, where X is the module number.
+
+## 1. For loop to create expression, genes and TOM objects for each module
+
+```{r}
+library(WGCNA)
+library(tidyr)
+
+# Enable parallel processing
+enableWGCNAThreads()
+
+# Check the number of threads WGCNA will use
+library(parallel)
+nThreads <- detectCores()
+print(paste("WGCNA will use", nThreads, "threads."))
+
+# Enable parallel processing with a specific number of cores
+enableWGCNAThreads(nThreads = 6)
+```
+
+```{r}
+#modules numbers and number of genes by module
+table(module_df$colors)
+#order modules 0 to 27
+sorted_mod <- sort(unique(module_df$colors))
+sorted_mod
+modules_of_interest = sorted_mod[1] # All modules as numbers. Run 1st module separately, then run all modules, because it's the largest and takes longer and module 0 are the genes that don't belong to any cluster.
+modules_of_interest = sorted_mod[2:28] #
+picked_power = 14
+
+for (module in modules_of_interest) {
+  genes_of_interest = module_df %>%
+    subset(colors == module)
+
+  assign(paste0("genes_mod", module), genes_of_interest)
+
+  expr_of_interest = normalized_counts_roots_t[genes_of_interest$gene_id,]
+
+  assign(paste0("expr_mod", module), expr_of_interest)
+
+  # Only recalculate TOM for modules of interest
+  TOM = TOMsimilarityFromExpr(t(expr_of_interest),
+                              power = picked_power)
+
+  # Add gene names to row and columns
+  row.names(TOM) = row.names(expr_of_interest)
+  colnames(TOM) = row.names(expr_of_interest)
+
+  assign(paste0("TOM_mod", module), TOM)
+
+  edge_list = data.frame(TOM) %>%
+    mutate(
+      gene1 = row.names(.)
+    ) %>%
+    pivot_longer(-gene1) %>%
+    dplyr::rename(gene2 = name, correlation = value) %>%
+    unique() %>%
+    subset(!(gene1==gene2)) %>%
+    mutate(
+      module1 = module_df[gene1,]$colors,
+      module2 = module_df[gene2,]$colors
+    )
+
+  assign(paste0("edge_list_mod", module), edge_list)
+  
+  # Export edge_list file to be read into Cytoscape, VisANT, etc
+  write_delim(edge_list,
+              file = paste0(out_dir,"module_edgelist/edgelist_mod", module, ".tsv"),
+              delim = "\t")
+}
+```
+
+
+## 2. For loop to get the hub genes for each module 
+```{r}
+# List of modules
+modules_of_interest = sorted_mod[2:28]
+
+nTop = 30 #number of top hub genes
+
+# Loop over each module
+for (module in modules_of_interest) {
+  expr_of_interest = get(paste0("expr_mod", module))
+  genes_of_interest = get(paste0("genes_mod", module))
+
+  genenames = row.names(expr_of_interest)
+  expr_of_interest_t = t(expr_of_interest)
+
+  IMconn = softConnectivity(expr_of_interest_t[,genenames])
+
+  top = (rank(-IMconn) <= nTop)
+
+  # Subset the TOM to the top genes
+  TOM = get(paste0("TOM_mod", module))
+  TOMhub = TOM[top, top]
+
+  hub_list = data.frame(TOMhub) %>%
+    mutate(
+      gene1 = row.names(.)
+    ) %>%
+    pivot_longer(-gene1) %>%
+    dplyr::rename(gene2 = name, correlation = value) %>%
+    unique() %>%
+    subset(!(gene1==gene2)) %>%
+    mutate(
+      module1 = module_df[gene1,]$colors,
+      module2 = module_df[gene2,]$colors
+    )
+
+  # Assign the objects to dynamically named variables
+  assign(paste0("genes_of_interest_mod", module), genes_of_interest)
+  assign(paste0("TOMhub_mod", module), TOMhub)
+  assign(paste0("hub_list_mod", module), hub_list)
+
+  #write hub list to a .csv
+  write.csv(hub_list, file = paste0(out_dir,"hubgenes_mod/hub_list_mod", module, ".csv"))
+}
+
+#write objects TOMhub_modX to csv
+for (module in modules_of_interest) {
+  TOMhub = get(paste0("TOMhub_mod", module))
+  write.csv(TOMhub, file = paste0(out_dir, "hubgenes_mod/TOMhub_mod", module, ".csv"))
+}
+```
+
+## Create a nice table with the hub genes for each module
+```{r}
+# Create a table with the hub genes using the first column of TOMhub_modX. Use flextable to create a doc file
+library(flextable)
+library(officer)
+
+modules_of_interest = sorted_mod[2:28]
+hub_genes_allmod <- data.frame()
+
+for (module in modules_of_interest) {
+  TOM_list <- get(paste0("TOMhub_mod", module))
+  
+  # Create a temporary data frame with the rownames and module information
+  temp_df <- data.frame(HubGenes = rownames(TOM_list), Module = module)
+  
+  # Bind the temporary data frame to hub_genes_allmod
+  hub_genes_allmod <- rbind(hub_genes_allmod, temp_df)
+}
+
+#write.csv(hub_genes_allmod, file = "output_wgcna/hub_genes_allmod.csv")
+
+#Add gene annotations 
+library("biomaRt")  # only use to remove cache bug
+library("AnnotationHub")
+
+length(hub_genes_allmod$HubGenes)
+# Create a biomaRt object for Phaseolus vulgaris version 2.1
+phytozome_v13 <- useMart(biomart = "phytozome_mart", 
+                dataset = "phytozome", 
+                host = "https://phytozome-next.jgi.doe.gov")
+
+#list the available datasets
+mysets <- listDatasets(phytozome_v13)
+mysets
+mydataset <- mysets$dataset[mysets$dataset == "phytozome"]
+mydataset
+
+myusemart <- useDataset(as.character(mydataset), mart = phytozome_v13)
+
+allattributes <- listAttributes(mart = myusemart)
+
+allattributes
+
+#Remove the .v2.1 from the gene names
+hub_genes_allmod$HubGenes <- gsub("\\.v2.1", "", hub_genes_allmod$HubGenes)
+
+
+# we want the correspondence of gene names with GO ids and GO descriptions
+attributes_to_retrieve <- c("organism_name", "gene_name1", "gene_description", 
+                     "go_id", "go_desc", "kegg_id", "kegg_desc", 
+                     "pathway_id", "pathway_desc", 
+                     "pfam_id", "pfam_desc")
+# Query the Phytozome database
+
+hub_genes_allmod_ann <- getBM(attributes = attributes_to_retrieve, 
+      filters = "gene_name_filter", 
+      values = hub_genes_allmod$HubGenes, 
+      mart = phytozome_v13)
+
+head(hub_genes_allmod_ann)
+dim(hub_genes_allmod_ann)
+write.csv(hub_genes_allmod_ann, file = paste0(out_dir,"hubgenes_mod/hub_genes_allmod_ann.csv"))
+
+#Merge the annotation with the hub genes, using gene_name1 as the key, keeping only a single copy of the gene_name1 column 
+# Remove duplicate rows based on the gene_name1 column
+hub_genes_allmod_ann_dedup <- hub_genes_allmod_ann[!duplicated(hub_genes_allmod_ann$gene_name1), ]
+
+
+# Join the data frames
+hub_genes_allmod_ann_join <- hub_genes_allmod %>% 
+  left_join(hub_genes_allmod_ann_dedup, by = c("HubGenes" = "gene_name1"))
+
+# Write the resulting data frame to a .csv file
+
+write.csv(hub_genes_allmod_ann_join, file = paste0(out_dir,"hubgenes_mod/hub_genes_allmod_ann_join.csv"))
+
+write.csv(hub_genes_allmod_ann_dedup, file = paste0(out_dir,"hubgenes_mod/hub_genes_allmod_ann_dedup.csv"))
+```
+
+
+## A. thaliana orthologs of marker and suberin genes
+
+```{r}
+# Load the necessary libraries
+
+# Load allmod_df data frame
+allmod_df <- read.csv(paste0(out_dir, "allmod_df.csv"))
+#write.csv(allmod_df, file = paste0(out_dir, "allmod_df.csv"), row.names = FALSE)
+
+# Load the marker genes and suberin genes
+suberin_pv_gene_ids <- c(
+  ASFT = "Phvul.001G089700",
+  LAC3 = "Phvul.008G252800, Phvul.006G074000",
+  LAC5 = "Phvul.008G220300, Phvul.001G246700",
+  CYP86B1 = "Phvul.011G029000",
+  CYP86A8 = "Phvul.010G099900",
+  CYP86A1 = "Phvul.006G065000, Phvul.008G262600",
+  KCS11 = "Phvul.003G160400",
+  KCS1 = "Phvul.009G257100",
+  ABCG23 = "Phvul.007G075700",
+  ABCG1 = "Phvul.007G008200",
+  ABCG2 = "Phvul.001G172400",
+  GPAT1 = "Phvul.008G191600, Phvul.006G033100",
+  GPAT8 = "Phvul.010G099700",
+  GPAT6 = "Phvul.008G106700, Phvul.010G004650",
+  GPAT5 = "Phvul.008G192000",
+  GELP22 = "Phvul.010G021001, Phvul.007G103600",
+  GELP38 = "Phvul.003G189500, Phvul.009G186800",
+  GELP49 = "Phvul.002G243500, Phvul.006G169100",
+  GELP51 = "Phvul.003G248600, Phvul.002G022600",
+  FAR1 = "Phvul.011G092500, Phvul.005G125400, Phvul.011G092400",
+  FAR4 = "Phvul.005G125400, Phvul.011G092500",
+  FAR5 = "Phvul.011G092500, Phvul.005G125400, Phvul.011G092400",
+  MYB39 = "Phvul.002G139500, Phvul.011G019200",  # SUBERMAN
+  MYB41 = "Phvul.011G110500, Phvul.005G109100",
+  MYB53 = "Phvul.003G036400",
+  MYB74 = "Phvul.006G192900, Phvul.002G221000",
+  MYB92 = "Phvul.003G036400",
+  MYB93 = "Phvul.009G031200",
+  MYB102 = "Phvul.006G192900, Phvul.002G221000",
+  SCR = "Phvul.008G077000",
+  CASP1 = "Phvul.007G152900, Phvul.007G153000",
+  CASP3 = "Phvul.005G122200",
+  ESB1 = "Phvul.011G068300, Phvul.011G068000, Phvul.011G068400",
+  SGN3 = "Phvul.002G187300, Phvul.009G244600"
+)
+
+
+library(tidyverse)
+
+# 1. Define tissue order (across all days)
+ordered_tissues <- c(
+  "Hypocotyl", "RootCrown", "MatureBranchedZoneTaproot",
+  "YoungBranchedZoneTaproot", "AUZTaproot", "AUZBasalRoots",
+  "RootTipTaproot", "RootTipBasalRoots"
+)
+
+# 2. Day 2 tissues only
+day2_tissues <- c("RootCrown", "AUZTaproot", "RootTipTaproot")
+
+# 3. Create tidy gene table (one gene_id per gene_name, preserving order)
+suberin_gene_df_unique <- tibble(
+  gene_name = names(suberin_pv_gene_ids),
+  gene_id = suberin_pv_gene_ids
+) %>%
+  tidyr::separate_rows(gene_id, sep = ",\\s*") %>%
+  dplyr::group_by(gene_name) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup()
+
+# 4. Join with expression data and summarize replicates
+suberin_expr_summary <- allmod_df %>%
+  dplyr::filter(gene_id %in% suberin_gene_df_unique$gene_id) %>%
+  dplyr::left_join(suberin_gene_df_unique, by = "gene_id") %>%
+  dplyr::filter(
+    (Day == "day5" & Tissue %in% ordered_tissues) |
+    (Day == "day2" & Tissue %in% day2_tissues)
+  ) %>%
+  dplyr::group_by(gene_name, Tissue, Genotype, Day) %>%
+  dplyr::summarise(mean_expr = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(
+    Tissue = factor(Tissue, levels = ordered_tissues),
+    gene_name = factor(gene_name, levels = rev(names(suberin_pv_gene_ids)))
+  )
+
+
+
+library(patchwork)
+
+# Filter day-specific datasets
+df_day2 <- dplyr::filter(suberin_expr_summary, Day == "day2")
+df_day5 <- dplyr::filter(suberin_expr_summary, Day == "day5")
+
+plot_day2 <- ggplot(df_day2, aes(x = Tissue, y = gene_name)) +
+  geom_point(aes(size = mean_expr, fill = mean_expr, group = Genotype),
+             shape = 21, color = "gray30",
+             position = position_dodge(width = 0.7),
+             alpha = 0.9) +
+  scale_fill_gradient2(low = "#62c3e3", mid = "white", high = "firebrick",
+                       midpoint = 4.5, limits = c(2.5, 11.5), name = "Expression") +
+  scale_size(range = c(1.5, 6), limits = c(2.5, 11.5), name = "Expression") +
+  labs(x = NULL, y = NULL, title = "Day 2") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_blank(),
+    legend.position = "none"
+  )
+
+plot_day5 <- ggplot(df_day5, aes(x = Tissue, y = gene_name)) +
+  geom_point(aes(size = mean_expr, fill = mean_expr, group = Genotype),
+             shape = 21, color = "gray30",
+             position = position_dodge(width = 0.7),
+             alpha = 0.9) +
+  scale_fill_gradient2(low = "#62c3e3", mid = "white", high = "firebrick",
+                       midpoint = 4.5, limits = c(2.5, 11.5), name = "Expression") +
+  scale_size(range = c(1.5, 6), limits = c(2.5, 11.5), name = "Expression") +
+  labs(x = NULL, y = NULL, title = "Day 5") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_blank(),  # hide y labels on right
+    strip.text = element_blank(),
+    legend.position = "right"
+  )
+
+#Step 3: Combine with layout widths
+
+subdotplot_combined <- plot_day2 + plot_day5 +
+  patchwork::plot_layout(widths = c(1, 2))  # 1 part for day2, 2 parts for day5
+# Step 4: Save the combined plot
+subdotplot_combined
+ggsave(
+  plot = subdotplot_combined,
+  filename = paste0(fig_dir, "suberin_expression_dotplot.pdf"),
+  dpi = 600, units = "in", height = 8, width = 8.5
+)
+
+
+
+#Add significance testing between genotypes for each gene × tissue × day
+
+library(rstatix)
+
+
+library(dplyr)
+library(tidyr)
+library(rstatix)
+library(purrr)
+
+# Safe t-test to avoid crashing on constant data
+safe_t_test <- purrr::possibly(.f = rstatix::t_test, otherwise = tibble(p = NA_real_))
+
+sig_results <- allmod_df %>%
+  dplyr::filter(gene_id %in% suberin_gene_df_unique$gene_id) %>%
+  dplyr::left_join(suberin_gene_df_unique, by = "gene_id", relationship = "many-to-many") %>%
+  dplyr::filter(
+    (Day == "day5" & Tissue %in% ordered_tissues) |
+    (Day == "day2" & Tissue %in% day2_tissues)
+  ) %>%
+  dplyr::group_by(gene_name, Tissue, Day) %>%
+  tidyr::nest() %>%
+  dplyr::mutate(test = map(data, ~ safe_t_test(.x, value ~ Genotype))) %>%
+  tidyr::unnest(test) %>%
+  rstatix::add_significance("p") %>%   # Use raw p for significance labeling
+  dplyr::select(gene_name, Tissue, Day, p, p.signif)
+
+
+
+suberin_expr_summary_sig <- suberin_expr_summary %>%
+  dplyr::left_join(sig_results, by = c("gene_name", "Tissue", "Day"))
+
+#save the significance results
+write.csv(suberin_expr_summary_sig, file = paste0(out_dir, "suberin_expr_summary_sig.csv"), row.names = FALSE)
+
+
+
+
+
+# Prepare significance data (only asterisks, only valid tissues)
+sig_day2 <- suberin_expr_summary_sig %>%
+  dplyr::filter(Day == "day2", Tissue %in% day2_tissues, p.signif != "ns")
+
+sig_day5 <- suberin_expr_summary_sig %>%
+  dplyr::filter(Day == "day5", Tissue %in% ordered_tissues, p.signif != "ns")
+
+
+# Filter day-specific datasets
+df_day2 <- dplyr::filter(suberin_expr_summary, Day == "day2")
+df_day5 <- dplyr::filter(suberin_expr_summary, Day == "day5")
+
+
+
+plot_day2 <- ggplot(df_day2, aes(x = Tissue, y = gene_name)) +
+  geom_point(aes(size = mean_expr, fill = mean_expr, group = Genotype),
+             shape = 21, color = "gray30",
+             position = position_dodge(width = 0.7),
+             alpha = 0.9) +
+  # Add after geom_point in each plot
+  geom_text(
+  data = sig_day2,
+  aes(x = Tissue, y = gene_name, label = p.signif),
+  inherit.aes = FALSE,
+  size = 3.5,
+  color = "black",
+  vjust = -1
+) +
+  scale_fill_gradient2(low = "#62c3e3", mid = "white", high = "firebrick",
+                       midpoint = 4.5, limits = c(2.5, 11.5), name = "Normalized expression (log2)") +
+  scale_size(range = c(1.5, 6), limits = c(2.5, 11.5)) +
+  labs(x = NULL, y = NULL, title = "Day 2") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_blank(),
+    legend.position = "none"
+  )
+
+plot_day5 <- ggplot(df_day5, aes(x = Tissue, y = gene_name)) +
+  geom_point(aes(size = mean_expr, fill = mean_expr, group = Genotype),
+             shape = 21, color = "gray30",
+             position = position_dodge(width = 0.7),
+             alpha = 0.9) +
+# Add after geom_point in each plot
+  geom_text(
+  data = sig_day5,
+  aes(x = Tissue, y = gene_name, label = p.signif),
+  inherit.aes = FALSE,
+  size = 3.5,
+  color = "black",
+  vjust = -1
+) +
+  scale_fill_gradient2(low = "#62c3e3", mid = "white", high = "firebrick",
+                       midpoint = 4.5, limits = c(2.5, 11.5), name = "Normalized expression (log2)") +
+  scale_size(range = c(1.5, 6), limits = c(2.5, 11.5)) +
+  labs(x = NULL, y = NULL, title = "Day 5") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_blank(),  # hide y labels on right
+    strip.text = element_blank(),
+    legend.position = "right"
+  )
+
+#Step 3: Combine with layout widths
+
+subdotplot_combined <- plot_day2 + plot_day5 +
+  patchwork::plot_layout(widths = c(1, 2))  # 1 part for day2, 2 parts for day5
+# Step 4: Save the combined plot
+subdotplot_combined
+ggsave(
+  plot = subdotplot_combined,
+  filename = paste0(fig_dir, "suberin_expression_dotplot_sig.pdf"),
+  dpi = 600, units = "in", height = 8, width = 8.5
+)
+
+#save env until here
+#save.image(file = "3.NetworkAnalysis/4_RDGA_NetworkAnalysis.RData")
+load("3.NetworkAnalysis/4_RDGA_NetworkAnalysis.RData")
+
+
+######
+##Suberin genes tileplot
+######
+suberin_gene_df_unique <- tibble(
+  gene_name = names(suberin_pv_gene_ids),
+  gene_id = suberin_pv_gene_ids
+) %>%
+  tidyr::separate_rows(gene_id, sep = ",\\s*") %>%
+  dplyr::group_by(gene_name) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup()
+
+# Adding Pv to gene names
+
+suberin_expr_summary <- allmod_df %>%
+  filter(gene_id %in% suberin_gene_df_unique$gene_id) %>%
+  left_join(suberin_gene_df_unique, by = "gene_id") %>%
+  filter(
+    (Day == "day5" & Tissue %in% ordered_tissues) |
+    (Day == "day2" & Tissue %in% day2_tissues)
+  ) %>%
+  group_by(gene_name, Tissue, Genotype, Day) %>%
+  summarise(mean_expr = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    gene_name = paste0("Pv", as.character(gene_name)),
+    gene_name = factor(gene_name, levels = unique(paste0("Pv", names(suberin_pv_gene_ids)))),
+    Tissue = factor(Tissue, levels = rev(ordered_tissues))
+  )
+
+summary(suberin_expr_summary$mean_expr)
+# Save the suberin expression summary
+#write.csv(suberin_expr_summary, file = paste0(out_dir, "suberin_expr_summary.csv"), row.names = FALSE)
+
+
+# Filter day-specific datasets
+df_day2 <- dplyr::filter(suberin_expr_summary, Day == "day2")
+df_day5 <- dplyr::filter(suberin_expr_summary, Day == "day5")
+
+
+devon_fill_scale <- scale_fill_gradientn(
+  colors = rev(color("devon")(256)),
+  limits = c(2.5, 10.5),
+  name = "Expression",
+  na.value = "white"
+)
+
+# Step 4: Plot for each day using tiles
+plot_day2 <- ggplot(df_day2, aes(x = gene_name, y = Tissue, group = Genotype)) +
+  geom_tile(aes(fill = mean_expr), color = "gray40", width = 0.6, height = 0.9,
+  position = position_dodge(width = 0.7)) +
+  # scale_fill_gradient2(
+  #   low = "#62c3e3", mid = "white", high = "firebrick",
+  #   midpoint = 5.3, limits = c(2.5, 10.5), name = "Expression", na.value = "white"
+  # ) +
+  devon_fill_scale +
+  labs(x = NULL, y = NULL, title = "Day 2") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_blank(),
+    legend.position = "none"
+  )
+
+
+plot_day5 <- ggplot(df_day5, aes(x = gene_name, y = Tissue, group = Genotype)) +
+  geom_tile(aes(fill = mean_expr), color = "gray40", width = 0.6, height = 0.9,
+  position = position_dodge(width = 0.7)) +
+  # scale_fill_gradient2(
+  #   low = "#62c3e3", mid = "white", high = "firebrick",
+  #   midpoint = 5.3, limits = c(2.5, 10.5), name = "Expression", na.value = "white"
+  # ) +
+  devon_fill_scale +
+  labs(x = NULL, y = NULL, title = "Day 5") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_blank(),
+    strip.text = element_blank(),
+    legend.position = "right"
+  )
+
+# Step 5: Combine and save
+suberin_tileplot <- plot_day2 + plot_day5 +
+  patchwork::plot_layout(heights = c(0.375, 1))
+suberin_tileplot
+
+
+# Save output
+ggsave(
+  plot = suberin_tileplot,
+  filename = paste0(fig_dir, "suberin_expression_tileplot_vert5x8.5.pdf"),
+  dpi = 600, units = "in", height = 5, width = 8.5
+)
+
+
+```
+
+## Marker genes plot
+```{r}
+# Load required libraries
+library(tidyverse)
+library(patchwork)
+
+# Define tissue order and day 2 tissues
+ordered_tissues <- c(
+  "Hypocotyl", "RootCrown", "MatureBranchedZoneTaproot",
+  "YoungBranchedZoneTaproot", "AUZTaproot", "AUZBasalRoots",
+  "RootTipTaproot", "RootTipBasalRoots"
+)
+
+day2_tissues <- c("RootCrown", "AUZTaproot", "RootTipTaproot")
+
+# Define marker gene dictionary
+marker_pv_gene_ids <- c(
+  WOX5     = "Phvul.008G226100, Phvul.001G241000",
+  PLT2     = "Phvul.011G058000",
+  CYCB1.1  = "Phvul.002G011600, Phvul.003G234000,  Phvul.002G015500",
+  EXPA1    = "Phvul.002G083600",
+  XTH19    = "Phvul.003G147300, Phvul.003G147700, Phvul.009G233200",
+  SAUR19   = "Phvul.009G001700, Phvul.009G001600, Phvul.009G001800",
+  CASP1    = "Phvul.007G152900, Phvul.007G153000",
+  MYB36    = "Phvul.003G148200",
+  PER64    = "Phvul.001G003800",
+  SCR      = "Phvul.008G077000",
+  SHR      = "Phvul.002G010700, Phvul.003G235000, Phvul.003G236300",
+  APL      = "Phvul.005G047600",
+  ATHB8    = "Phvul.009G110500",
+  SUC2     = "Phvul.007G088200",
+  LBD16    = "Phvul.007G195100, Phvul.001G159300",
+  IAA28    = "Phvul.005G165600, Phvul.004G083000, Phvul.010G145000"
+)
+
+# marker_pv_gene_ids <- c(
+# XTH19a    = "Phvul.003G147300",
+# XTH19b    = "Phvul.003G147700",
+# XTH19c    = "Phvul.009G233200", 
+# XTH19d    = "Phvul.009G233200")
+
+
+
+# Step 1: Create tidy gene table (one gene_id per gene_name)
+marker_gene_df_unique <- tibble(
+  gene_name = names(marker_pv_gene_ids),
+  gene_id = marker_pv_gene_ids
+) %>%
+  tidyr::separate_rows(gene_id, sep = ",\\s*") %>%
+  dplyr::group_by(gene_name) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup()
+
+
+
+# Step 2: Join with expression data and summarize replicates
+marker_expr_summary <- allmod_df %>%
+  dplyr::filter(gene_id %in% marker_gene_df_unique$gene_id) %>%
+  dplyr::left_join(marker_gene_df_unique, by = "gene_id") %>%
+  dplyr::filter(
+    (Day == "day5" & Tissue %in% ordered_tissues) |
+    (Day == "day2" & Tissue %in% day2_tissues)
+  ) %>%
+  dplyr::group_by(gene_name, Tissue, Genotype, Day) %>%
+  dplyr::summarise(mean_expr = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(
+    Tissue = factor(Tissue, levels = ordered_tissues),
+    gene_name = factor(gene_name, levels = rev(names(marker_pv_gene_ids)))
+  )
+
+
+# Adding Pv to gene names
+
+marker_expr_summary <- allmod_df %>%
+  filter(gene_id %in% marker_gene_df_unique$gene_id) %>%
+  left_join(marker_gene_df_unique, by = "gene_id") %>%
+  filter(
+    (Day == "day5" & Tissue %in% ordered_tissues) |
+    (Day == "day2" & Tissue %in% day2_tissues)
+  ) %>%
+  group_by(gene_name, Tissue, Genotype, Day) %>%
+  summarise(mean_expr = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    gene_name = paste0("Pv", as.character(gene_name)),
+    gene_name = factor(gene_name, levels = unique(paste0("Pv", names(marker_pv_gene_ids)))),
+    Tissue = factor(Tissue, levels = rev(ordered_tissues))
+  )
+
+summary(marker_expr_summary$mean_expr)
+# Save the marker expression summary
+#write.csv(marker_expr_summary, file = paste0(out_dir, "marker_expr_summary.csv"), row.names = FALSE)
+
+# Step 3: Filter by day
+marker_day2 <- dplyr::filter(marker_expr_summary, Day == "day2")
+marker_day5 <- dplyr::filter(marker_expr_summary, Day == "day5")
+
+# Step 4: Plot for each day
+plot_day2 <- ggplot(marker_day2, aes(x = Tissue, y = gene_name)) +
+  geom_point(aes(fill = mean_expr, group = Genotype),
+             size = 5, shape = 21, color = "gray30",
+             position = position_dodge(width = 0.7),
+             alpha = 0.9) +
+  #scale_fill_gradient(low = "#62c3e3", high = "firebrick", name = "Expression") +
+  scale_fill_gradient2(low = "#62c3e3", mid = "white", high = "firebrick",
+                       midpoint = 5.3, limits = c(2.5, 11.5), name = "Expression") +
+  #scale_size(range = c(1.5, 6), name = "Expression") +
+  labs(x = NULL, y = NULL, title = "Day 2") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_blank(),
+    legend.position = "none"
+  )
+
+plot_day5 <- ggplot(marker_day5, aes(x = Tissue, y = gene_name)) +
+  geom_point(aes(fill = mean_expr, group = Genotype),
+             size = 5, shape = 21, color = "gray30",
+             position = position_dodge(width = 0.7),
+             alpha = 0.9) +
+  scale_fill_gradient2(low = "#62c3e3", mid = "white", high = "firebrick",
+                       midpoint = 5.3, limits = c(2.5, 11.5), name = "Expression") +
+  scale_size(range = c(1.5, 6), name = "Expression") +
+  labs(x = NULL, y = NULL, title = "Day 5") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_blank(),
+    strip.text = element_blank(),
+    legend.position = "right"
+  )
+
+# Step 5: Combine and save
+marker_dotplot <- plot_day2 + plot_day5 +
+  patchwork::plot_layout(widths = c(0.375, 1))
+
+marker_dotplot
+
+ggsave(
+  plot = marker_dotplot,
+  filename = paste0(fig_dir, "marker_expression_dotplot3.pdf"),
+  dpi = 600, units = "in", height = 6, width = 8
+)
+
+
+# Tile plot for marker genes
+
+#install.packages("khroma")
+library(khroma)
+devon <- color("devon")
+plot(devon(256))
+devon_fill_scale <- scale_fill_gradientn(
+  colors = rev(color("devon")(256)),
+  limits = c(2.5, 10.5),
+  name = "Expression",
+  na.value = "white"
+)
+
+# Step 4: Plot for each day using tiles
+plot_day2 <- ggplot(marker_day2, aes(x = gene_name, y = Tissue, group = Genotype)) +
+  geom_tile(aes(fill = mean_expr), color = "gray40", width = 0.6, height = 0.9,
+  position = position_dodge(width = 0.7)) +
+  # scale_fill_gradient2(
+  #   low = "#62c3e3", mid = "white", high = "firebrick",
+  #   midpoint = 5.3, limits = c(2.5, 10.5), name = "Expression", na.value = "white"
+  # ) +
+  devon_fill_scale +
+  labs(x = NULL, y = NULL, title = "Day 2") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_blank(),
+    legend.position = "none"
+  )
+
+plot_day5 <- ggplot(marker_day5, aes(x = gene_name, y = Tissue, group = Genotype)) +
+  geom_tile(aes(fill = mean_expr), color = "gray40", width = 0.6, height = 0.9,
+  position = position_dodge(width = 0.7)) +
+  # scale_fill_gradient2(
+  #   low = "#62c3e3", mid = "white", high = "firebrick",
+  #   midpoint = 5.3, limits = c(2.5, 10.5), name = "Expression", na.value = "white"
+  # ) +
+  devon_fill_scale +
+  labs(x = NULL, y = NULL, title = "Day 5") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_blank(),
+    strip.text = element_blank(),
+    legend.position = "right"
+  )
+
+# Step 5: Combine and save
+marker_tileplot <- plot_day2 + plot_day5 +
+  patchwork::plot_layout(heights = c(0.375, 1))
+
+marker_tileplot
+
+
+# Save output
+ggsave(
+  plot = marker_tileplot,
+  filename = paste0(fig_dir, "marker_expression_tileplot_vertical.pdf"),
+  dpi = 600, units = "in", height = 5, width = 7.5
+)
+
+
+
+
+```
