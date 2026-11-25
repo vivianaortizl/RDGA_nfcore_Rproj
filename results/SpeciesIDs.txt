@@ -1,0 +1,2 @@
+0: Athaliana_447_Araport11.protein.fa
+1: Pvulgaris_442_v2.1.protein.fa
