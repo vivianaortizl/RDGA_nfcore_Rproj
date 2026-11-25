@@ -1,0 +1,1967 @@
+---
+title: "RDGA: 2_Differential_expression_analysis"
+author: "Viviana Ortiz"
+affiliation: "Root Haus Lab - Michigan State University"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  github_document:
+    toc: true
+---
+
+```{r options, eval = TRUE, echo = FALSE, results = 'hide'}
+
+rm(list=ls(all=TRUE)) #Removes all variables in the global environment
+
+Sys.time() # prints out the time and date you ran the code
+
+options(scipen = 999) # stops anything from being in scientific notation
+```
+
+```{r setupdir, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../")) #set wd to the project dir instead of the .Rmd file dir
+#The current working directory inside a notebook chunk is always the directory containing the notebook .Rmd file.  
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=8, fig.height=8) # Set plot size to 8 inches wide and 6 inches tall
+```
+
+```{r cranmirror, eval = TRUE, echo = FALSE, include=FALSE}
+# Set a CRAN mirror (choose one appropriate for your location)
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+```
+
+```{r loadlib, include=FALSE}
+# Import libraries
+library("DESeq2")
+library("tidyverse")
+library("tximport")
+library("datasets")
+library("reshape2")
+library("ggplot2")
+library("ggpubr")
+library("ggrepel")
+library("RColorBrewer")
+library("scales")
+library("ggConvexHull")
+library("ggnewscale")
+```
+
+## Differential expression analysis
+
+### Load R data from the previous step: 1_RDGA_Alltissues
+
+```{r }
+load("1.DEAnalysis/1_RDGA_Alltissues.RData")
+```
+
+In this section, we will perform a differential expression analysis using the DESeq2 package. We will compare the expression of genes between
+
+```{r }
+dds_roots
+attr(dds_roots, "modelMatrix")
+
+res <- results(dds_roots)
+res
+head(res)
+resultsNames(dds)
+dds_roots$Genotype
+dds_roots$Sample_ID #the default reference level is: "AUZBasalRoots_day5_RedHawk"
+```
+
+### Note on factor levels: 
+By default, R will choose a reference level for factors based on alphabetical order. Then, if you never tell the DESeq2 functions which level you want to compare against (e.g. which level represents the control group), the comparisons will be based on the alphabetical order of the levels. 
+There are two solutions: you can either explicitly tell results which comparison to make using the contrast argument (this will be shown later), or you can explicitly set the factors levels. 
+In order to see the change of reference levels reflected in the results names, you need to either run DESeq or nbinomWaldTest/nbinomLRT after the re-leveling operation. 
+Setting the factor levels can be done in two ways, either using factor or relevel:
+
+```{r}
+dds_roots$Sample_ID #the default reference level is: AUZBasalRoots_day5_RedHawk
+
+#If want to change the reference level: for example to "RootCrown_day2_RedHawk"
+#dds_roots$Sample_ID  <- relevel(dds_roots$Sample_ID, ref = "RootCrown_day2_RedHawk")
+#dds_roots$Sample_ID #the new reference level is: RootCrown_day2_RedHawk 
+
+#Need to run DeSeq again after leveling the factors
+#dds_roots <- DESeq(dds_roots)
+#res <- results(dds_roots)
+
+head(res)
+resultsNames(dds_roots)
+
+#Test differentially expressed genes using a sample contrast
+all_genes_results <- results(dds_roots, contrast = c("Sample_ID",                      # name of the factor
+                                  "AUZBasalRoots_day5_Stampede",    # name of the numerator level for fold change
+                                  "AUZBasalRoots_day5_RedHawk"))  # name of the denominator level  (this is the reference level)
+all_equal(res, all_genes_results)
+
+#Extracting the table of differential genes
+head(all_genes_results)                
+mcols(all_genes_results)
+
+# False discovery rates
+
+library(dplyr)
+
+# threshold of p = 0.05
+all_genes_results %>% 
+  as.data.frame() %>% 
+  filter(padj < 0.05) %>% 
+  dim()
+#3205 genes are differentially expressed at a threshold of p = 0.05
+
+resultsNames(dds_roots)
+resLFC_AUZBRStRh <- lfcShrink(dds = dds_roots, 
+                  res = all_genes_results,
+                  type = "apeglm",
+                  coef = "Sample_ID_AUZBasalRoots_day5_Stampede_vs_AUZBasalRoots_day5_RedHawk") # name or number of the coefficient (LFC) to shrink
+
+```
+
+## Read the differential expression results from nextflow_DE pipeline
+
+```{r}
+#Read the differential expression results from the nextflow_DE pipeline
+#in:Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/other/deseq2
+
+#Read the differential expression results from the nextflow_DE pipeline in Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/differential/AUZBasalRoots_day5_RedHawk_vs_Stampede.deseq2.results_filtered.tsv
+DE_results <- read.table("Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/differential/AUZBasalRoots_day5_RedHawk_vs_Stampede.deseq2.results_filtered.tsv", header = TRUE, sep = "\t")
+
+#Read all the differential expression results from the nextflow_DE pipeline in Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/differential folder into a list of dataframes
+# Load necessary library
+library(dplyr)
+
+# Define the directory where DE results are stored
+results_dir <- "Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/differential"
+
+# Get a list of all filtered DESeq2 result files
+DE_results_all <- list.files(results_dir, full.names = TRUE, pattern = "deseq2.results_filtered.tsv", recursive = TRUE)
+
+# Read all differential expression results into a named list
+de_results_list <- lapply(DE_results_all, read.delim)
+
+# Assign meaningful names to list elements (remove path and file extension)
+names(de_results_list) <- gsub(".deseq2.results_filtered.tsv$", "", basename(DE_results_all))
+
+# Print the names of datasets loaded
+print(names(de_results_list))
+str(de_results_list)
+#Save R data until here
+#save(de_results_list, file = "1.DEAnalysis/2_DE_results_list.RData")
+```
+
+## Visualize DE results list
+```{r}
+```
+
+
+## Log2Fold change distribution
+```{r}
+# Extract log2FoldChange values from all DE results
+logFC_values <- unlist(lapply(de_results_list, function(df) df$log2FoldChange))
+
+# Get min and max log2FoldChange
+logFC_min <- min(logFC_values, na.rm = TRUE)
+logFC_min
+logFC_max <- max(logFC_values, na.rm = TRUE)
+logFC_max
+logFC_sum <- summary(logFC_values)
+logFC_sum
+
+# Print results
+cat("Minimum log2FoldChange:", logFC_min, "\n")
+cat("Maximum log2FoldChange:", logFC_max, "\n")
+cat("Summary of log2FoldChange:", logFC_sum, "\n")
+
+# Load required library
+library(ggplot2)
+
+# Create a histogram of log2FoldChange values
+ggplot(data.frame(log2FC = logFC_values), aes(x = log2FC)) +
+  geom_histogram(binwidth = 0.2, fill = "blue", alpha = 0.6, color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of log2FoldChange", x = "log2FoldChange", y = "Frequency") +
+  geom_vline(xintercept = c(logFC_min, logFC_max), linetype = "dashed", color = "red")
+
+# Convert log2FoldChange into a dataframe with condition labels
+logFC_df <- do.call(rbind, lapply(names(de_results_list), function(name) {
+  data.frame(Condition = name, log2FC = de_results_list[[name]]$log2FoldChange)
+}))
+
+# Remove NA values
+logFC_df <- logFC_df[!is.na(logFC_df$log2FC), ]
+
+# Boxplot of log2FoldChange across conditions
+ggplot(logFC_df, aes(x = Condition, y = log2FC)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightblue", alpha = 0.6) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "log2FoldChange Distribution Across Conditions", x = "Comparison", y = "log2FoldChange")
+
+#Separates positive and negative log2FoldChange values into two facets. Orders the contrasts based on contrasts_df$id.
+library(ggplot2)
+library(dplyr)
+
+# Load the contrasts data frame
+contrasts_df <- read.csv("Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/contrast/contrasts_pairwise_TissueDayGenotype_Rep_onlyroots.csv")
+
+
+# Ensure Condition (contrast) levels match the order in contrasts_df$id
+logFC_df <- logFC_df %>%
+  mutate(Condition = factor(Condition, levels = contrasts_df$id))
+
+# Add a new column to separate positive and negative log2FoldChange values
+logFC_df <- logFC_df %>%
+  mutate(LFC_Direction = factor(ifelse(log2FC >= 0, "Positive LFC", "Negative LFC"),
+                                levels = c("Positive LFC", "Negative LFC")))  # Ensure correct facet order
+
+# Create the violin plot with vertical facets
+violin_logfc_all <- ggplot(logFC_df, aes(x = Condition, y = log2FC, fill = LFC_Direction)) +
+  geom_violin(scale = "width", alpha = 0.6, trim = TRUE) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_grid(rows = vars(LFC_Direction), scales = "free_y") +  # Stacked facets (Positive on top)
+  labs(
+    x = "Contrast",
+    y = expression(Log[2]~(FoldChange))  
+  ) +
+  scale_fill_manual(
+    name = expression(Log[2]~(FoldChange)),  # Correct legend formatting
+    values = c("Positive LFC" = "darkblue", "Negative LFC" = "firebrick")
+  )
+
+# Display the violin plot
+print(violin_logfc_all)
+
+# Save the plot with save_plot
+save_plot(violin_logfc_all, "violin_logfc_all", width = 10, height = 8)
+```
+## Count upregulated and downregulated genes
+
+DE counts table adding columns for:
+
+Upregulated genes (log2FC > 0, padj ≤ 0.05)
+Downregulated genes (log2FC < 0, padj ≤ 0.05)
+Threshold upregulated genes (log2FC > 2, padj ≤ 0.05)
+Threshold downregulated genes (log2FC < -2, padj ≤ 0.05)
+Highly upregulated genes (top 10% log2FC, padj ≤ 0.05)
+Highly downregulated genes (bottom 10% log2FC, padj ≤ 0.05)
+
+```{r}
+
+# Load the contrasts data frame
+contrasts_df <- read.csv("Results_nf_pipelines/ResultsDiffExp_nfcore_Repblock_onlyroots_shiny/tables/contrast/contrasts_pairwise_TissueDayGenotype_Rep_onlyroots.csv")
+
+# Ensure 'id' column exists in the contrasts table
+if(!"id" %in% colnames(contrasts_df)) stop("The contrasts data frame does not contain an 'id' column.")
+
+# Check available IDs
+print(contrasts_df$id)
+
+# Load required library
+library(dplyr)
+
+# Define upregulation and downregulation thresholds
+logFC_threshold <- 0  # Genes with log2FoldChange > 0 are upregulated, < 0 are downregulated
+padj_threshold <- 0.05  # Significant DEGs threshold
+
+# Function to count upregulated and downregulated genes
+count_DEGs <- function(df) {
+  df %>%
+    filter(padj <= padj_threshold) %>%  # Keep only significant DEGs
+    summarise(
+      Upregulated = sum(log2FoldChange > logFC_threshold, na.rm = TRUE),
+      Downregulated = sum(log2FoldChange < logFC_threshold, na.rm = TRUE)
+    )
+}
+
+# Apply function to all differential expression results
+DE_counts_list <- lapply(de_results_list, count_DEGs)
+
+# Convert list to a data frame
+DE_counts_table <- bind_rows(DE_counts_list, .id = "Contrast")
+
+# Ensure 'Contrast' column matches 'id' in the contrast table
+DE_counts_table <- DE_counts_table %>%
+  dplyr::rename(id = Contrast)  # Rename for easy matching
+
+# Merge with the contrasts data frame to retain order
+DE_counts_table <- contrasts_df %>%
+  select(id) %>%  # Keep only 'id' to enforce order
+  left_join(DE_counts_table, by = "id")  # Merge while preserving order
+
+# Print the ordered table
+print(DE_counts_table)
+
+# Save the table as a CSV file
+#write.csv(DE_counts_table, "1.DEAnalysis/output/DEG_counts_ordered_by_contrasts.csv", row.names = FALSE)
+
+
+# Function to count upregulated, downregulated, and highly regulated genes
+count_DEGs_extended <- function(df) {
+  padj_threshold <- 0.05  # Significance threshold
+  logFC_standard <- 0  # Standard up/down regulation
+  logFC_threshold <- 2  # Threshold for strong up/down regulation
+
+  # Filter significant DEGs
+  df_filtered <- df %>% filter(padj <= padj_threshold)
+
+  # Compute top and bottom 10% log2FC thresholds
+  logFC_top10 <- quantile(df_filtered$log2FoldChange, 0.90, na.rm = TRUE)
+  logFC_bottom10 <- quantile(df_filtered$log2FoldChange, 0.10, na.rm = TRUE)
+
+  # Count differentially expressed genes with clear, R-safe column names
+  data.frame(
+    Upregulated_logFC_gt_0 = sum(df_filtered$log2FoldChange > logFC_standard, na.rm = TRUE),
+    Downregulated_logFC_lt_0 = sum(df_filtered$log2FoldChange < logFC_standard, na.rm = TRUE),
+    Threshold_Upregulated_logFC_gt_2 = sum(df_filtered$log2FoldChange > logFC_threshold, na.rm = TRUE),
+    Threshold_Downregulated_logFC_lt_neg2 = sum(df_filtered$log2FoldChange < -logFC_threshold, na.rm = TRUE),
+    Highly_Upregulated_top10_logFC = sum(df_filtered$log2FoldChange > logFC_top10, na.rm = TRUE),
+    Highly_Downregulated_bottom10_logFC = sum(df_filtered$log2FoldChange < logFC_bottom10, na.rm = TRUE)
+  )
+}
+
+
+# Apply function to all DE results
+DE_counts_list_extended <- lapply(de_results_list, count_DEGs_extended)
+
+# Convert list to a dataframe
+DE_counts_table_extended <- bind_rows(DE_counts_list_extended, .id = "Contrast")
+
+# Convert columns to character type for correct merging
+DE_counts_table_extended$Contrast <- as.character(DE_counts_table_extended$Contrast)
+contrasts_df$id <- as.character(contrasts_df$id)
+
+# Merge with contrasts_df to retain the correct order
+DE_counts_table_extended <- contrasts_df %>%
+  select(id) %>%  # Keep only 'id' to enforce order
+  left_join(DE_counts_table_extended, by = c("id" = "Contrast"))  # Merge while preserving order
+
+# Print the ordered table
+print(DE_counts_table_extended)
+
+# Merge reference and target columns from contrasts_df into DE_counts_table_extended
+DE_counts_table_extended <- DE_counts_table_extended %>%
+  left_join(contrasts_df %>% select(id, reference, target), by = "id")
+
+# Print the first few rows to verify
+head(DE_counts_table_extended)
+
+# Save the updated DE counts table as a CSV file
+#write.csv(DE_counts_table_extended, "1.DEAnalysis/output/DEG_counts_extended.csv", row.names = FALSE)
+
+assign_context <- function(contrast_id) {
+  if (grepl("RedHawk_vs_Stampede$", contrast_id)) {
+    return("between_genotypes_within_tissue_day")
+  } else if (grepl("day2_vs_day5$", contrast_id)) {
+    return("across_days_within_tissue_genotype")
+  } else if (grepl(".*_vs_.*", contrast_id)) {
+    return("between_tissues_within_genotype_day")
+  } else {
+    return("other")  # Default category for unclassified cases
+  }
+}
+
+# Apply the function to the `id` column in DE_counts_table_extended
+DE_counts_table_extended <- DE_counts_table_extended %>%
+  mutate(context = sapply(id, assign_context))
+
+# Print the first few rows to verify
+head(DE_counts_table_extended)
+
+
+# Save the updated DE counts table as a CSV file
+#write.csv(DE_counts_table_extended, "1.DEAnalysis/output/DEG_counts_extended.csv", row.names = FALSE)
+
+
+# Load necessary library
+library(dplyr)
+
+# Ensure the id column is a character
+DE_counts_table_extended$id <- as.character(DE_counts_table_extended$id)
+
+# Define the function to assign Group based on "id"
+assign_group <- function(id) {
+  # Assign fixed categories based on row positions
+  if (id %in% DE_counts_table_extended$id[1:3]) {
+    return("Day2")
+  } else if (id %in% DE_counts_table_extended$id[4:11]) {
+    return("Day5")
+  } else if (id %in% DE_counts_table_extended$id[c(12, 14, 16)]) {
+    return("RedHawk")
+  } else if (id %in% DE_counts_table_extended$id[c(13, 15, 17)]) {
+    return("Stampede")
+  } else {
+    # Extract the second-to-last and last part after splitting by underscore
+    parts <- unlist(strsplit(id, "_"))
+    if (length(parts) >= 2) {
+      return(paste(parts[length(parts) - 1], parts[length(parts)], sep = "_"))
+    } else {
+      return(id)  # If less than 2 parts, return the original id
+    }
+  }
+}
+
+# Apply the function to the "id" column using dplyr::mutate()
+DE_counts_table_extended <- DE_counts_table_extended %>%
+  dplyr::mutate(Group = sapply(id, assign_group))
+
+# Display first few rows to check
+head(DE_counts_table_extended)
+unique(DE_counts_table_extended$Group)
+
+#Save the updated DE counts table as a CSV file
+#write.csv(DE_counts_table_extended, "1.DEAnalysis/output/DEG_counts_extended.csv", row.names = FALSE)
+
+#Read the DE_counts_table_extended
+#DE_counts_table_extended <- read.csv("1.DEAnalysis/output/DEG_counts_extended.csv", header = TRUE, sep = ",")
+```
+
+
+## Identify differentially expressed genes (DEGs)
+
+Unique in the upregulated genes for each contrast
+Unique in the downregulated genes for each contrast
+Shared between upregulated and downregulated genes across contrasts within each group: First identify shared genes within the group and then check which of those shared genes appear in each contrast.
+Group was defined for each contrast based on tissue comparison in DEG_counts_extended.csv.
+
+Find shared genes within each group first (Shared_Upregulated & Shared_Downregulated).
+For each contrast, determine which shared genes appear.
+Update summary_long to count shared genes per contrast.
+
+```{r}
+identify_unique_shared_DEGs_grouped <- function(de_list, contrast_groups, padj_threshold = 0.05, logFC_threshold = 0) {
+  
+  results_list <- list()
+  
+  for (group_name in names(contrast_groups)) {
+    
+    group_contrasts <- contrast_groups[[group_name]]
+    
+    # Extract DEGs for selected contrasts
+    degs_group <- list()
+    
+    for (contrast in group_contrasts) {
+      if (contrast %in% names(de_list)) {
+        df <- de_list[[contrast]] %>% filter(padj <= padj_threshold)
+        upregulated <- df %>% filter(log2FoldChange > logFC_threshold) %>% pull(gene_id)
+        downregulated <- df %>% filter(log2FoldChange < -logFC_threshold) %>% pull(gene_id)
+        
+        degs_group[[contrast]] <- list(
+          Upregulated = upregulated,
+          Downregulated = downregulated
+        )
+      }
+    }
+    
+    # Identify shared genes across all contrasts in the group
+    shared_up <- Reduce(intersect, lapply(degs_group, function(x) x$Upregulated))
+    shared_down <- Reduce(intersect, lapply(degs_group, function(x) x$Downregulated))
+
+    # Identify genes unique to each contrast in the group
+    unique_up_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Upregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_up_contrast) <- names(degs_group)
+
+    unique_down_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Downregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_down_contrast) <- names(degs_group)
+    
+    # Store results
+    results_list[[group_name]] <- list(
+      Shared_Upregulated = shared_up,
+      Shared_Downregulated = shared_down,
+      Unique_Upregulated_by_contrast = unique_up_contrast,
+      Unique_Downregulated_by_contrast = unique_down_contrast
+    )
+  }
+  
+  return(results_list)
+}
+
+# Contrast groups using Group column from DE_counts_table_extended
+contrast_groups <- DE_counts_table_extended %>%
+  dplyr::select(id, Group)  # Keeping both ID and Group for reference
+
+# Convert to a named list
+contrast_groups <- split(contrast_groups$id, contrast_groups$Group)
+
+# Print the structure to verify
+contrast_groups
+str(contrast_groups)
+
+
+DEG_results_grouped <- identify_unique_shared_DEGs_grouped(de_results_list, contrast_groups)
+
+
+library(dplyr)
+library(purrr)
+
+# Convert the lists into data frames for easy export
+unique_up_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  data.frame(
+    Group = group, 
+    Contrast = rep(names(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast), 
+                   sapply(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast, length)),
+    Gene = unlist(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast, use.names = FALSE),
+    Category = "Unique_Upregulated"
+  )
+})
+
+unique_down_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  data.frame(
+    Group = group, 
+    Contrast = rep(names(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast), 
+                   sapply(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast, length)),
+    Gene = unlist(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast, use.names = FALSE),
+    Category = "Unique_Downregulated"
+  )
+})
+
+
+# Identify shared genes by contrast (genes that are shared across the group but found in a specific contrast)
+shared_up_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  shared_genes_group <- DEG_results_grouped[[group]]$Shared_Upregulated  # All shared upregulated genes in the group
+  
+  map_df(names(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast), function(contrast) {
+    contrast_genes <- DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast[[contrast]]  # Get genes in contrast
+    
+    shared_in_contrast <- intersect(shared_genes_group, contrast_genes)  # Shared genes present in this contrast
+    
+    if (length(shared_in_contrast) > 0) {
+      return(data.frame(Group = group, Contrast = contrast, Gene = shared_in_contrast, Category = "Shared_Upregulated"))
+    } else {
+      return(data.frame(Group = character(0), Contrast = character(0), Gene = character(0), Category = character(0)))  # Empty df if no matches
+    }
+  })
+})
+
+shared_down_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  shared_genes_group <- DEG_results_grouped[[group]]$Shared_Downregulated  # All shared downregulated genes in the group
+  
+  map_df(names(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast), function(contrast) {
+    contrast_genes <- DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast[[contrast]]  # Get genes in contrast
+    
+    shared_in_contrast <- intersect(shared_genes_group, contrast_genes)  # Shared genes present in this contrast
+    
+    if (length(shared_in_contrast) > 0) {
+      return(data.frame(Group = group, Contrast = contrast, Gene = shared_in_contrast, Category = "Shared_Downregulated"))
+    } else {
+      return(data.frame(Group = character(0), Contrast = character(0), Gene = character(0), Category = character(0)))  # Empty df if no matches
+    }
+  })
+})
+
+
+# Save results
+write.csv(unique_up_by_contrast_df, "1.DEAnalysis/output/Unique_Upregulated_by_Contrast.csv", row.names = FALSE)
+write.csv(unique_down_by_contrast_df, "1.DEAnalysis/output/Unique_Downregulated_by_Contrast.csv", row.names = FALSE)
+write.csv(shared_up_by_contrast_df, "1.DEAnalysis/output/Shared_Upregulated_by_Contrast.csv", row.names = FALSE)
+write.csv(shared_down_by_contrast_df, "1.DEAnalysis/output/Shared_Downregulated_by_Contrast.csv", row.names = FALSE)
+
+
+# Combine all data frames
+summary_long <- bind_rows(unique_up_by_contrast_df, 
+                          unique_down_by_contrast_df, 
+                          shared_up_by_contrast_df, 
+                          shared_down_by_contrast_df)
+
+# Summarize gene counts
+summary_df <- summary_long %>%
+  dplyr::group_by(Group, Contrast, Category) %>%
+  dplyr::summarise(Count = n(), .groups = "drop")
+
+# Ensure Contrast order matches the id order from DE_counts_table_extended
+summary_df <- summary_df %>%
+  mutate(Contrast = factor(Contrast, levels = DE_counts_table_extended$id))
+
+# Save summary_long
+write.csv(summary_df, "1.DEAnalysis/output/summary_long_tissuegroupsbycontrast.csv", row.names = FALSE)
+
+
+
+#old 
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+#install.packages("ggvenn")
+library(ggvenn)
+# Count the number of unique and shared genes per contrast
+summary_df <- unique_up_by_contrast_df %>%
+  dplyr::group_by(Group, Contrast) %>%
+  dplyr::summarise(Unique_Upregulated = n(), .groups = "drop") %>%
+  full_join(unique_down_by_contrast_df %>%
+              dplyr::group_by(Group, Contrast) %>%
+              dplyr::summarise(Unique_Downregulated = n(), .groups = "drop"),
+            by = c("Group", "Contrast")) %>%
+  replace_na(list(Unique_Upregulated = 0, Unique_Downregulated = 0))
+
+# Convert to long format for ggplot
+summary_long <- summary_df %>%
+  pivot_longer(cols = c(Unique_Upregulated, Unique_Downregulated), 
+               names_to = "Category", 
+               values_to = "Count")
+
+```
+
+## new code 
+Identify unique and shared DEGs by group for tissue comparison and determine which contrasts contain the shared genes for both up- and downregulated genes.
+```{r}
+# Contrast groups using Group column from DE_counts_table_extended
+contrast_groups <- DE_counts_table_extended %>%
+  dplyr::select(id, Group)  # Keeping both ID and Group for reference
+
+str(contrast_groups)
+
+# Convert to a named list
+contrast_groups <- split(contrast_groups$id, contrast_groups$Group)
+
+# Print the structure to verify
+contrast_groups
+str(contrast_groups)
+
+```
+
+# newest code 
+```{r}
+identify_unique_shared_DEGs_grouped <- function(de_list, contrast_groups, padj_threshold = 0.05, logFC_threshold = 0) {
+  
+  results_list <- list()
+  
+  for (group_name in names(contrast_groups)) {
+    
+    group_contrasts <- contrast_groups[[group_name]]
+    
+    # Extract DEGs for selected contrasts
+    degs_group <- list()
+    
+    for (contrast in group_contrasts) {
+      if (contrast %in% names(de_list)) {
+        df <- de_list[[contrast]] %>% filter(padj <= padj_threshold)
+        upregulated <- df %>% filter(log2FoldChange > logFC_threshold) %>% pull(gene_id)
+        downregulated <- df %>% filter(log2FoldChange < -logFC_threshold) %>% pull(gene_id)
+        
+        degs_group[[contrast]] <- list(
+          Upregulated = upregulated,
+          Downregulated = downregulated
+        )
+      }
+    }
+    
+    # Identify shared genes across all contrasts in the group
+    shared_up <- Reduce(intersect, lapply(degs_group, function(x) x$Upregulated))
+    shared_down <- Reduce(intersect, lapply(degs_group, function(x) x$Downregulated))
+    
+    # Identify shared genes by contrast (should be zero if shared by group)
+    shared_up_by_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(intersect(degs_group[[contrast]]$Upregulated, shared_up), shared_up)
+    })
+    names(shared_up_by_contrast) <- names(degs_group)
+    
+    shared_down_by_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(intersect(degs_group[[contrast]]$Downregulated, shared_down), shared_down)
+    })
+    names(shared_down_by_contrast) <- names(degs_group)
+    
+    # Identify genes unique to each contrast in the group
+    unique_up_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Upregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_up_contrast) <- names(degs_group)
+    
+    unique_down_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Downregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_down_contrast) <- names(degs_group)
+    
+    # Store results
+    results_list[[group_name]] <- list(
+      Shared_Upregulated_by_Group = shared_up,
+      Shared_Downregulated_by_Group = shared_down,
+      Shared_Upregulated_by_Contrast = shared_up_by_contrast,
+      Shared_Downregulated_by_Contrast = shared_down_by_contrast,
+      Unique_Upregulated_by_Contrast = unique_up_contrast,
+      Unique_Downregulated_by_Contrast = unique_down_contrast
+    )
+  }
+  
+  return(results_list)
+}
+```
+
+
+### working code
+```{r}
+identify_unique_shared_DEGs_grouped <- function(de_list, contrast_groups, padj_threshold = 0.05, logFC_threshold = 0) {
+  
+  results_list <- list()
+  
+  for (group_name in names(contrast_groups)) {
+    
+    group_contrasts <- contrast_groups[[group_name]]
+    
+    # Extract DEGs for selected contrasts
+    degs_group <- list()
+    
+    for (contrast in group_contrasts) {
+      if (contrast %in% names(de_list)) {
+        df <- de_list[[contrast]] %>% filter(padj <= padj_threshold)
+        upregulated <- df %>% filter(log2FoldChange > logFC_threshold) %>% pull(gene_id)
+        downregulated <- df %>% filter(log2FoldChange < -logFC_threshold) %>% pull(gene_id)
+        
+        degs_group[[contrast]] <- list(
+          Upregulated = upregulated,
+          Downregulated = downregulated
+        )
+      }
+    }
+    
+    # Identify shared genes across all contrasts in the group
+    shared_up <- Reduce(intersect, lapply(degs_group, function(x) x$Upregulated))
+    shared_down <- Reduce(intersect, lapply(degs_group, function(x) x$Downregulated))
+    
+    # Identify genes unique to each contrast in the group
+    unique_up_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Upregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_up_contrast) <- names(degs_group)
+    
+    unique_down_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Downregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_down_contrast) <- names(degs_group)
+    
+    # Identify shared genes within each contrast that are also in the shared group genes
+    shared_up_by_contrast <- lapply(names(degs_group), function(contrast) {
+      intersect(degs_group[[contrast]]$Upregulated, shared_up)
+    })
+    names(shared_up_by_contrast) <- names(degs_group)
+    
+    shared_down_by_contrast <- lapply(names(degs_group), function(contrast) {
+      intersect(degs_group[[contrast]]$Downregulated, shared_down)
+    })
+    names(shared_down_by_contrast) <- names(degs_group)
+    
+    # Store results
+    results_list[[group_name]] <- list(
+      Shared_Upregulated_by_Group = shared_up,
+      Shared_Downregulated_by_Group = shared_down,
+      Shared_Upregulated_by_Contrast = shared_up_by_contrast,
+      Shared_Downregulated_by_Contrast = shared_down_by_contrast,
+      Unique_Upregulated_by_Contrast = unique_up_contrast,
+      Unique_Downregulated_by_Contrast = unique_down_contrast
+    )
+  }
+  
+  return(results_list)
+}
+```
+
+```{r}
+# Apply function
+DEG_results_grouped <- identify_unique_shared_DEGs_grouped(de_results_list, contrast_groups)
+
+# Convert lists into data frames for export
+save_deg_results <- function(results, category, filename) {
+  df_list <- map(names(results), function(group) {
+    gene_list <- results[[group]][[category]]
+    
+    # Handle missing category
+    if (is.null(gene_list) || length(gene_list) == 0) {
+      return(data.frame(
+        Group = group,
+        Contrast = NA,
+        Gene = NA,
+        Count = 0,  # Ensure numeric type
+        Category = category
+      ))
+    }
+    
+    # Extract contrast names and gene counts
+    contrast_names <- names(gene_list)
+    contrast_lengths <- sapply(gene_list, length)
+    
+    # Ensure valid contrast names
+    if (is.null(contrast_names)) {
+      contrast_names <- rep(NA, length(gene_list))
+    }
+    
+    # If no genes exist in any contrast, return a single row with Count = 0
+    if (all(contrast_lengths == 0)) {
+      return(data.frame(
+        Group = group,
+        Contrast = NA,
+        Gene = NA,
+        Count = 0,  # Ensure numeric type
+        Category = category
+      ))
+    }
+    
+    # Construct dataframe ensuring valid row lengths
+    gene_values <- unlist(gene_list, use.names = FALSE)
+    contrast_rep <- rep(contrast_names, contrast_lengths)
+
+    # If there are no genes but contrast names exist, handle gracefully
+    if (length(gene_values) == 0) {
+      gene_values <- NA
+      contrast_rep <- NA
+    }
+
+    df <- data.frame(
+      Group = rep(group, length(gene_values)),  # Repeat group name
+      Contrast = contrast_rep,  # Expand contrast names
+      Gene = gene_values,  # Flatten gene list
+      Category = category,  # Assign category
+      Count = as.numeric(contrast_lengths[match(contrast_rep, contrast_names)])  # Ensure numeric count
+    )
+    
+    # Replace NA counts with 0
+    df$Count[is.na(df$Count)] <- 0
+    
+    return(df)
+  })
+  
+  # Combine all results
+  df <- bind_rows(df_list)
+
+  # Ensure numeric format for Count
+  df$Count <- as.numeric(df$Count)
+  
+  # Write the CSV file
+  write.csv(df, filename, row.names = FALSE)
+}
+
+
+# Save all categories
+save_deg_results(DEG_results_grouped, "Unique_Upregulated_by_Contrast", "1.DEAnalysis/output/Unique_Upregulated_by_Contrast.csv")
+save_deg_results(DEG_results_grouped, "Unique_Downregulated_by_Contrast", "1.DEAnalysis/output/Unique_Downregulated_by_Contrast.csv")
+save_deg_results(DEG_results_grouped, "Shared_Upregulated_by_Contrast", "1.DEAnalysis/output/Shared_Upregulated_by_Contrast.csv")
+save_deg_results(DEG_results_grouped, "Shared_Downregulated_by_Contrast", "1.DEAnalysis/output/Shared_Downregulated_by_Contrast.csv")
+save_deg_results(DEG_results_grouped, "Shared_Upregulated_by_Group", "1.DEAnalysis/output/Shared_Upregulated_by_Group.csv")
+save_deg_results(DEG_results_grouped, "Shared_Downregulated_by_Group", "1.DEAnalysis/output/Shared_Downregulated_by_Group.csv")
+
+# Create summary table
+summary_long <- bind_rows(
+  read.csv("1.DEAnalysis/output/Unique_Upregulated_by_Contrast.csv"),
+  read.csv("1.DEAnalysis/output/Unique_Downregulated_by_Contrast.csv"),
+  read.csv("1.DEAnalysis/output/Shared_Upregulated_by_Contrast.csv"),
+  read.csv("1.DEAnalysis/output/Shared_Downregulated_by_Contrast.csv")
+)
+
+summary_df <- summary_long %>%
+  dplyr::group_by(Group, Contrast, Category) %>%
+  dplyr::summarise(Count = n(), .groups = "drop")
+
+# Ensure contrast order
+summary_df <- summary_df %>%
+  mutate(Contrast = factor(Contrast, levels = DE_counts_table_extended$id))
+
+# Save summary
+write.csv(summary_df, "1.DEAnalysis/output/0214_summary_bycontrast.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+# old code not by group
+```{r}
+
+#Function to identify unique and shared DEGs by group
+identify_unique_shared_DEGs_grouped <- function(de_list, contrast_groups, padj_threshold = 0.05, logFC_threshold = 0) {
+  
+  results_list <- list()
+  
+  for (group_name in names(contrast_groups)) {
+    
+    group_contrasts <- contrast_groups[[group_name]]
+    
+    # Extract DEGs for selected contrasts
+    degs_group <- list()
+    
+    for (contrast in group_contrasts) {
+      if (contrast %in% names(de_list)) {
+        df <- de_list[[contrast]] %>% filter(padj <= padj_threshold)
+        upregulated <- df %>% filter(log2FoldChange > logFC_threshold) %>% pull(gene_id)
+        downregulated <- df %>% filter(log2FoldChange < -logFC_threshold) %>% pull(gene_id)
+        
+        degs_group[[contrast]] <- list(
+          Upregulated = upregulated,
+          Downregulated = downregulated
+        )
+      }
+    }
+    
+    # Identify shared genes across all contrasts in the group
+    shared_up <- Reduce(intersect, lapply(degs_group, function(x) x$Upregulated))
+    shared_down <- Reduce(intersect, lapply(degs_group, function(x) x$Downregulated))
+    
+    # Assign shared genes to each contrast
+    shared_up_by_contrast <- lapply(names(degs_group), function(contrast) {
+      intersect(degs_group[[contrast]]$Upregulated, shared_up)
+    })
+    names(shared_up_by_contrast) <- names(degs_group)
+
+    shared_down_by_contrast <- lapply(names(degs_group), function(contrast) {
+      intersect(degs_group[[contrast]]$Downregulated, shared_down)
+    })
+    names(shared_down_by_contrast) <- names(degs_group)
+
+    # Identify genes unique to each contrast in the group
+    unique_up_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Upregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_up_contrast) <- names(degs_group)
+
+    unique_down_contrast <- lapply(names(degs_group), function(contrast) {
+      setdiff(degs_group[[contrast]]$Downregulated, unlist(degs_group[names(degs_group) != contrast], use.names = FALSE))
+    })
+    names(unique_down_contrast) <- names(degs_group)
+    
+    # Store results
+    results_list[[group_name]] <- list(
+      Shared_Upregulated_by_contrast = shared_up_by_contrast,
+      Shared_Downregulated_by_contrast = shared_down_by_contrast,
+      Unique_Upregulated_by_contrast = unique_up_contrast,
+      Unique_Downregulated_by_contrast = unique_down_contrast
+    )
+  }
+  
+  return(results_list)
+}
+
+
+# Apply the function to the DE results
+DEG_results_grouped <- identify_unique_shared_DEGs_grouped(de_results_list, contrast_groups)
+
+
+# Convert the lists into data frames for easy export
+unique_up_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  data.frame(
+    Group = group, 
+    Contrast = rep(names(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast), 
+                   sapply(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast, length)),
+    Gene = unlist(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast, use.names = FALSE),
+    Category = "Unique_Upregulated"
+  )
+})
+
+unique_down_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  data.frame(
+    Group = group, 
+    Contrast = rep(names(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast), 
+                   sapply(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast, length)),
+    Gene = unlist(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast, use.names = FALSE),
+    Category = "Unique_Downregulated"
+  )
+})
+
+
+# Identify shared genes by contrast (genes that are shared across the group but found in a specific contrast)
+shared_up_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  shared_genes_group <- DEG_results_grouped[[group]]$Shared_Upregulated  # All shared upregulated genes in the group
+  
+  map_df(names(DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast), function(contrast) {
+    contrast_genes <- DEG_results_grouped[[group]]$Unique_Upregulated_by_contrast[[contrast]]  # Get genes in contrast
+    
+    shared_in_contrast <- intersect(shared_genes_group, contrast_genes)  # Shared genes present in this contrast
+    
+    if (length(shared_in_contrast) > 0) {
+      return(data.frame(Group = group, Contrast = contrast, Gene = shared_in_contrast, Category = "Shared_Upregulated"))
+    } else {
+      return(data.frame(Group = character(0), Contrast = character(0), Gene = character(0), Category = character(0)))  # Empty df if no matches
+    }
+  })
+})
+
+shared_down_by_contrast_df <- map_df(names(DEG_results_grouped), function(group) {
+  shared_genes_group <- DEG_results_grouped[[group]]$Shared_Downregulated  # All shared downregulated genes in the group
+  
+  map_df(names(DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast), function(contrast) {
+    contrast_genes <- DEG_results_grouped[[group]]$Unique_Downregulated_by_contrast[[contrast]]  # Get genes in contrast
+    
+    shared_in_contrast <- intersect(shared_genes_group, contrast_genes)  # Shared genes present in this contrast
+    
+    if (length(shared_in_contrast) > 0) {
+      return(data.frame(Group = group, Contrast = contrast, Gene = shared_in_contrast, Category = "Shared_Downregulated"))
+    } else {
+      return(data.frame(Group = character(0), Contrast = character(0), Gene = character(0), Category = character(0)))  # Empty df if no matches
+    }
+  })
+})
+
+
+# Save results
+write.csv(unique_up_by_contrast_df, "1.DEAnalysis/output/Unique_Upregulated_by_Contrast.csv", row.names = FALSE)
+write.csv(unique_down_by_contrast_df, "1.DEAnalysis/output/Unique_Downregulated_by_Contrast.csv", row.names = FALSE)
+write.csv(shared_up_by_contrast_df, "1.DEAnalysis/output/Shared_Upregulated_by_Contrast.csv", row.names = FALSE)
+write.csv(shared_down_by_contrast_df, "1.DEAnalysis/output/Shared_Downregulated_by_Contrast.csv", row.names = FALSE)
+
+
+# Combine all data frames
+summary_long <- bind_rows(unique_up_by_contrast_df, 
+                          unique_down_by_contrast_df, 
+                          shared_up_by_contrast_df, 
+                          shared_down_by_contrast_df)
+
+# Summarize gene counts
+summary_df <- summary_long %>%
+  dplyr::group_by(Group, Contrast, Category) %>%
+  dplyr::summarise(Count = n(), .groups = "drop")
+
+# Ensure Contrast order matches the id order from DE_counts_table_extended
+summary_df <- summary_df %>%
+  mutate(Contrast = factor(Contrast, levels = DE_counts_table_extended$id))
+
+# Save summary_long
+write.csv(summary_df, "1.DEAnalysis/output/summary_long_tissuegroupsbycontrast.csv", row.names = FALSE)
+
+
+```
+
+
+## Visualization of unique and shared DEGs by group for tissue comparison
+Venn diagrams for shared upregulated and downregulated genes across groups
+
+Each contrast contains the corresponding genes, and the Venn diagram should compare contrasts within each group separately for upregulated and downregulated genes.
+
+```{r}
+library(VennDiagram)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+
+# Function to extract DEGs (Upregulated and Downregulated) for each group
+extract_DEGs_by_group <- function(de_list, contrast_groups, padj_threshold = 0.05, logFC_threshold = 0) {
+  group_DEGs <- list()
+
+  for (group in names(contrast_groups)) {
+    upregulated_list <- list()
+    downregulated_list <- list()
+
+    contrasts <- contrast_groups[[group]]  # Use predefined contrast groups
+
+    for (contrast in contrasts) {
+      if (contrast %in% names(de_list)) {  # Ensure the contrast exists in the DE results
+        df <- de_list[[contrast]] %>% filter(padj <= padj_threshold)
+
+        upregulated <- df %>% filter(log2FoldChange > logFC_threshold) %>% pull(gene_id)
+        downregulated <- df %>% filter(log2FoldChange < -logFC_threshold) %>% pull(gene_id)
+
+        upregulated_list[[contrast]] <- upregulated
+        downregulated_list[[contrast]] <- downregulated
+      }
+    }
+
+    group_DEGs[[group]] <- list(
+      Upregulated = upregulated_list,
+      Downregulated = downregulated_list
+    )
+  }
+
+  return(group_DEGs)
+}
+
+# Function to plot proportional Venn diagrams
+plot_venn_diagram <- function(deg_list, title) {
+  # Remove empty sets and NULL values
+  deg_list <- deg_list[lengths(deg_list) > 0]
+
+  # Ensure at least two groups exist before plotting
+  if (length(deg_list) < 2) {
+    message(paste("Skipping", title, "as it has less than two valid groups."))
+    return(NULL)
+  }
+
+  # Ensure all elements are lists of genes
+  deg_list <- lapply(deg_list, function(x) {
+    if (is.null(x)) return(character(0))  # Convert NULLs to empty character vectors
+    if (is.list(x)) return(unlist(x))     # Flatten nested lists
+    return(x)
+  })
+
+  # Define colors dynamically based on the number of sets
+  colors <- c("red", "blue", "green", "yellow", "purple")[1:length(deg_list)]
+
+  venn.plot <- tryCatch({
+    venn.diagram(
+      x = deg_list,
+      category.names = names(deg_list),
+      filename = NULL,
+      fill = colors,
+      alpha = 0.5,
+      cat.col = "black",
+      main = title,
+      cex = 1.2,
+      cat.cex = 1
+    )
+  }, error = function(e) {
+    message(paste("Error in plotting Venn diagram for", title, ":", e$message))
+    return(NULL)
+  })
+
+  if (!is.null(venn.plot)) {
+    grid.draw(venn.plot)
+  }
+}
+
+# Extract DEGs for each group using contrast_groups
+grouped_DEGs <- extract_DEGs_by_group(de_results_list, contrast_groups)
+
+# Debugging: Check structure
+str(grouped_DEGs)
+
+# Generate Venn diagrams for each group
+pdf("1.DEAnalysis/figures/pdf/DE_Venn_DEGs_plots.pdf")  # Save output to a PDF file
+for (group in names(grouped_DEGs)) {
+  par(mfrow = c(1, 2))  # Two plots per row
+
+  # Upregulated Venn Diagram
+  plot_venn_diagram(grouped_DEGs[[group]]$Upregulated, paste("Upregulated -", group))
+
+  # Downregulated Venn Diagram
+  plot_venn_diagram(grouped_DEGs[[group]]$Downregulated, paste("Downregulated -", group))
+}
+dev.off()
+
+# Debugging: Check structure
+str(grouped_DEGs)
+names(grouped_DEGs)
+test_names <- names(test)
+
+# Create the Venn diagram with tissue colors matched by grep in names(test) 
+# Function to match colors based on tissue name
+match_colors <- function(names_list, palette) {
+  matched_colors <- sapply(names_list, function(name) {
+    # Find the first matching tissue in the name
+    matched_tissue <- names(palette)[sapply(names(palette), function(t) grepl(t, name))]
+    
+    # Return the first matching color, or default to black if none found
+    if (length(matched_tissue) > 0) {
+      return(palette[matched_tissue[1]])  # Use the first match
+    } else {
+      return("#000000")  # Default black for unmatched names
+    }
+  })
+  
+  return(matched_colors)
+}
+
+# Match colors
+matched_colors <- match_colors(test_names, tissue_palette)
+
+
+tissue_palette
+test <- grouped_DEGs[["Day2"]]$Upregulated
+names(test) 
+# Set up the Venn diagram configuration
+venn_config <- venn.diagram(
+  x = test,
+  category.names = names(test),
+  fill = matched_colors,
+  filename = "1.DEAnalysis/figures/pdf/DE_Venn_DEGs_plots.png", # Set filename to NULL to display the plot directly in R session
+  imagetype = "png", # You can change this to other formats like "pdf", "jpeg", etc.
+  col = "transparent", # Set background color to transparent for better display in R session
+  cex = 2.7,
+  cex.label = 7,
+  lwd = 2 
+)
+# Display the Venn diagram
+grid.newpage()
+grid.draw(venn_config)
+
+```
+
+# Save table with unique and shared DEGs by group for tissue comparison
+Using venn diagram results to create a table with unique and shared DEGs (intersection) for each group and contrast.
+
+Test with the Day2 group Upregulated genes.
+```{r}
+#install.packages("gplots")
+library(gplots)
+
+#Save / load R data
+#save.image("my_env.RData")
+#load("my_env.RData")
+
+test <- grouped_DEGs[["Day2"]]$Upregulated
+test
+str(test)
+test_names <- names(test)
+v.table <- venn(test)
+v.table #so here the table is not printing 
+
+str(v.table)
+print(v.table[, ])  # Try printing as a matrix
+#Check the intersections attribute:
+print(attr(v.table, "intersections"))
+
+# Extract the "intersections" attribute from the venn object and save it as a CSV file
+# Extract intersections attribute
+intersections <- attr(v.table, "intersections")
+
+# Convert the intersections list to a data frame
+intersections_df <- stack(intersections)
+
+# Rename columns for clarity
+colnames(intersections_df) <- c("Gene", "Comparison")
+
+# Save to CSV
+write.csv(intersections_df, "1.DEAnalysis/output/venn_testintersections.csv", row.names = FALSE)
+
+## Debugging table not printing
+#find("venn")
+#[1] "package:eulerr" "package:gplots" #eulerr package conflicts with gplots package for venn function
+#detach("package:eulerr", unload=TRUE)
+```
+
+Iterate over all groups and contrasts to save the intersection tables.
+Excluding groups RedHawk_day5 and Stampede_day5 because they each have 28 contrasts (pairwise tissue contrasts) which is too many for a Venn diagram, and for calculating intersections.
+The code didn't work with that many contrasts, so we will exclude them from this. 
+```{r}
+# Load required library
+library(gplots)
+
+# Define output directory
+output_dir <- "1.DEAnalysis/output/DEGs_vennintersections/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# Groups to exclude
+excluded_groups <- c("RedHawk_day5", "Stampede_day5")
+
+# Iterate over groups (e.g., "Day2", "Day5", etc.)
+for (group in names(grouped_DEGs)) {
+  
+  # Skip excluded groups
+  if (group %in% excluded_groups) {
+    message(paste("Skipping group:", group, "- too many contrasts for Venn diagram."))
+    next
+  }
+  
+  # Iterate over expression categories (e.g., "Upregulated", "Downregulated")
+  for (expression_category in names(grouped_DEGs[[group]])) {
+    
+    # Extract the list of gene sets
+    test <- grouped_DEGs[[group]][[expression_category]]
+    
+    # Check if test has at least two groups for a Venn diagram
+    if (length(test) < 2) {
+      message(paste("Skipping", group, expression_category, "- insufficient groups"))
+      next
+    }
+
+    # Debugging: Print progress before running the Venn function
+    print(paste("Processing:", group, expression_category, "with", length(test), "sets"))
+    flush.console()  # Forces output in R console
+
+    # Try generating Venn diagram
+    tryCatch({
+      v.table <- venn(test, show.plot = FALSE)  # Avoid plotting
+
+      # Extract intersections
+      intersections <- attr(v.table, "intersections")
+      
+      if (!is.null(intersections)) {
+        # Convert intersections list to a data frame
+        intersections_df <- stack(intersections)
+        colnames(intersections_df) <- c("Gene", "Comparison")
+        
+        # Define file name
+        file_name <- paste0(output_dir, group, "_", expression_category, "_venn_intersections.csv")
+        
+        # Save to CSV
+        write.csv(intersections_df, file_name, row.names = FALSE, quote = FALSE)
+        
+        message(paste("Saved:", file_name))
+      } else {
+        message(paste("No intersections found for", group, expression_category))
+      }
+      
+    }, error = function(e) {
+      message(paste("Error in", group, expression_category, ":", e$message))
+    })
+  }
+}
+
+```
+
+
+## Venn diagrams and upset plots using ggvenn package
+```{r}
+# GitHub
+if (!requireNamespace("ggvenn")){
+  remotes::install_github("yanlinlin82/ggvenn")
+}
+library(ggVennDiagram)
+ggVennDiagram(test)
+ggVennDiagram(test, force_upset = TRUE)
+
+# Load required library
+library(ggVennDiagram)
+library(tidyr)
+library(dplyr)
+# Load required libraries
+library(ggVennDiagram)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tidyplots)# For color palettes
+#install.packages("tidyterra")
+#library(tidyterra)  # For color palettes
+
+colors_continuous_rocket
+colors_continuous_inferno
+# Generate Venn diagram
+#Testing colors
+venn_plot1 <- ggVennDiagram(test) + scale_fill_gradient(low="#FAEBDDFF", high = "#9D1B5BFF")
+venn_plot1
+venn_plot2 <- ggVennDiagram(test) + scale_fill_gradient(low="#FAEBDDFF", high = "#c46161")
+venn_plot2
+venn_plot3 <- ggVennDiagram(test) + scale_fill_gradient(low="#aea3bb", high = "#c46161")
+venn_plot3
+venn_plot4 <- ggVennDiagram(test) + scale_fill_gradient(low="#cedfce", high = "#693670")
+venn_plot4
+
+library(gridExtra)
+#plot those above plots side to side
+venn_plotcolors <- grid.arrange(venn_plot1, venn_plot2, venn_plot3, venn_plot4, ncol = 2)
+venn_plotcolors
+#save to figures
+ggsave("1.DEAnalysis/figures/venn_plotcolors.pdf", venn_plotcolors, width = 12, height = 8)
+```
+
+
+## Red Hawk vs Stampede day 2 and 5: Venn diagrams and upset plots
+```{r}
+# Red Hawk vs Stampede day 2
+
+# Extract intersection data from the Venn object
+d2up <- grouped_DEGs[["Day2"]]$Upregulated
+d2up
+d2do <- grouped_DEGs[["Day2"]]$Downregulated
+d2do
+
+# Rename sets in d2up
+d2_root_tissue_labels_abrev <- c("RCR", "AUZT", "RTT")
+names(d2up) <- d2_root_tissue_labels_abrev
+names(d2do) <- d2_root_tissue_labels_abrev
+
+# Venn diagrams day 2
+venn_plot_St <- ggVennDiagram(d2up) + scale_fill_gradient(low="grey90", high = "burlywood")
+venn_plot_St
+venn_plot_Rh <- ggVennDiagram(d2do) + scale_fill_gradient(low="grey90", high = "brown4")
+venn_plot_Rh
+venn_plotd2 <- grid.arrange(venn_plot_Rh, venn_plot_St, ncol = 2)
+venn_plotd2
+#save to figures
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day2_doRh.pdf", venn_plot_Rh, width = 4, height = 3)
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day2_upSt.pdf", venn_plot_St, width = 4, height = 3)
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day2_upRh_doSt.pdf", venn_plotd2, width = 8, height = 6)
+
+# Define base color (black) for the full palette
+custom_palette <- rep("black", 26)
+root_tissue_palette <- tissue_palette[-1]
+d2_tissue_palette <- root_tissue_palette[c(2, 5, 7)]
+custom_palette[1:length(d2_tissue_palette)] <- d2_tissue_palette
+
+
+# Upset plot Upregulated DEGs Stampede day 2
+venn_St_d2 = Venn(d2up)
+venn_plot_St_d2 <- plot_upset(venn_St_d2, nintersects = 12, order.set.by = "none", 
+           relative_height = 2, relative_width = 0.3,
+           top.bar.color = "burlywood",
+            sets.bar.color = d2_tissue_palette,
+            intersection.matrix.color = custom_palette[1:12])
+venn_plot_St_d2
+
+
+
+# Upset plot Downregulated DEGs Red Hawk day 2
+venn_Rh_d2 = Venn(d2do)
+venn_plot_Rh_d2 <- plot_upset(venn_Rh_d2, nintersects = 12, order.set.by = "none", 
+           relative_height = 2, relative_width = 0.3,
+           top.bar.color = "brown4",
+            sets.bar.color = d2_tissue_palette,
+            intersection.matrix.color = custom_palette[1:12])
+venn_plot_Rh_d2
+
+ggsave("1.DEAnalysis/figures/pdf/DEGs_upset_day2_upSt_color.pdf", venn_plot_St_d2, width = 4, height = 4)
+ggsave("1.DEAnalysis/figures/pdf/DEGs_upset_day2_doRh_color.pdf", venn_plot_Rh_d2, width = 4, height = 4)
+
+
+
+# Define mapping of original names to abbreviations
+root_tissue_labels_abrev <- c("HYP", "RCR", "MBZ", "YBZ", "AUZT", "AUZB", "RTT", "RTB")
+
+# Red Hawk vs Stampede day 5
+
+d5up <- grouped_DEGs[["Day5"]]$Upregulated
+str(d5up)
+names(d5up)
+
+#Reorder list to match the tissue order
+d5up <- d5up[c(1, 2, 3, 4, 5, 7, 6, 8)]
+names(d5up)
+
+# Rename sets in d5up
+names(d5up) <- root_tissue_labels_abrev
+
+# Print the updated names to verify
+print(names(d5up))
+
+# Stampede day 5
+# Generate UpSet plot while maintaining the set order
+venn_plot_St_d5 <- ggVennDiagram(d5up, force_upset = TRUE, order.set.by = "none", nintersects = 12, relative_height = 2, relative_width = 0.3) 
+
+#venn_plot_St_d5 <- ggVennDiagram(d5up, force_upset = TRUE, order.set.by = "none", order.intersect.by = "none", relative_height = 2, relative_width = 0.3) 
+
+# Display the plot
+venn_plot_St_d5
+
+# Red Hawk day 5
+
+d5do <- grouped_DEGs[["Day5"]]$Downregulated
+#Reorder list to match the tissue order
+d5do <- d5do[c(1, 2, 3, 4, 5, 7, 6, 8)]
+names(d5do)
+
+# Rename sets in d5do
+names(d5do) <- root_tissue_labels_abrev
+venn_plot_Rh_d5 <- ggVennDiagram(d5do, force_upset = TRUE, order.set.by = "none", nintersects = 12, relative_height = 2, relative_width = 0.3) 
+#venn_plot_Rh_d5 <- ggVennDiagram(d5do, force_upset = TRUE, order.set.by = "none", order.intersect.by = "none", relative_height = 2, relative_width = 0.3) 
+venn_plot_Rh_d5
+
+
+#save indvidual plots
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day5_doRh_12intersects.pdf", venn_plot_Rh_d5, width = 5, height = 4)
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day5_upSt_12intersects.pdf", venn_plot_St_d5, width = 5, height = 4)
+
+# Colored upset plots
+# Define base color (black) for the full palette
+custom_palette <- rep("black", 26)
+root_tissue_palette <- tissue_palette[-1]
+
+
+# Assign root_tissue_palette colors to the beginning of custom_palette
+custom_palette[1:length(root_tissue_palette)] <- root_tissue_palette
+
+# Print the custom palette
+print(custom_palette)
+
+#Upset plot Upregulated DEGs Stampede day 5
+venn_St_d5 = Venn(d5up)
+venn_plot_St_d5_col <- plot_upset(venn_St_d5, nintersects = 12, order.set.by = "none", 
+           relative_height = 2, relative_width = 0.3,
+           top.bar.color = "burlywood",
+            sets.bar.color = root_tissue_palette,
+            intersection.matrix.color = custom_palette)
+venn_plot_St_d5_col
+
+# Upset plot Downregulated DEGs Red Hawk day 5
+venn_Rh_d5 = Venn(d5do)
+venn_plot_Rh_d5_col <- plot_upset(venn_Rh_d5, nintersects = 12, order.set.by = "none", 
+           relative_height = 2, relative_width = 0.3,
+           top.bar.color = "brown4",
+            sets.bar.color = root_tissue_palette,
+            intersection.matrix.color = custom_palette[1:23])
+venn_plot_Rh_d5_col
+
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day5_upSt_color.pdf", venn_plot_St_d5_col, width = 5, height = 4)
+ggsave("1.DEAnalysis/figures/pdf/DEGs_venn_day5_doRh_color.pdf", venn_plot_Rh_d5_col, width = 5, height = 4)
+```
+
+
+## Save the intersection data to CSV files
+
+## Using one dataset as example
+```{r}
+str(grouped_DEGs)
+names(grouped_DEGs)
+d5up <- grouped_DEGs[["Day5"]]$Upregulated
+
+# Extract intersection data from the Venn object
+venn_data <- process_region_data(Venn(d5up))
+str(venn_data)
+# Expand the gene list while preserving the order of "id"
+intersections_df <- venn_data %>%
+  unnest(cols = item) %>%  # Expand the list column into individual rows
+  rename(Comparison = name, Gene = item, Count = count) %>%  # Rename columns
+  arrange(id)  # Keep original order from venn_data
+
+intersections_df
+# Define file name
+file_name <- "1.DEanalysis/output/ggvenn_testintersections.csv"
+
+# Save to CSV
+write.csv(intersections_df, file_name, row.names = FALSE, quote = FALSE)
+
+# Print message
+message(paste("Saved intersections to:", file_name))
+
+```
+
+## Iterate over all groups and contrasts to save the intersection tables
+Converts the item list into a character column (comma-separated genes).
+Replaces / with - in the id column.
+Saves each venn_data table as a CSV file.
+Stores venn_data as an R object (.rds file) for future use.
+```{r}
+# Load required libraries
+# Load required libraries
+library(ggVennDiagram)
+library(readr)  # For writing CSV files
+
+# Define output directory
+output_dir <- "1.DEAnalysis/output/DEGs_ggvenn_intersections/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+rds_output_dir <- "1.DEAnalysis/output/DEGs_ggvenn_intersections_RDS/"
+if (!dir.exists(rds_output_dir)) dir.create(rds_output_dir, recursive = TRUE)
+
+# Loop through each group in grouped_DEGs
+for (group in names(grouped_DEGs)) {
+  
+  # Loop through Upregulated and Downregulated categories
+  for (expression_category in names(grouped_DEGs[[group]])) {
+    
+    # Extract gene sets
+    gene_sets <- grouped_DEGs[[group]][[expression_category]]
+    
+    # Skip if fewer than two sets (Venn needs at least 2 groups)
+    if (length(gene_sets) < 2) {
+      message(paste("Skipping", group, expression_category, "- insufficient sets for Venn"))
+      next
+    }
+    
+    # Process Venn intersections
+    venn_data <- process_region_data(Venn(gene_sets))
+    
+    # Modify `id` column: replace "/" with "-"
+    venn_data$id <- gsub("/", "_", venn_data$id)
+
+    # Convert the `item` column (list of genes) to a single string (comma-separated)
+    venn_data$item <- sapply(venn_data$item, function(x) paste(x, collapse = ", "))
+
+    # Save as CSV if data is not empty
+    if (nrow(venn_data) > 0) {
+      # Define file paths
+      csv_file <- paste0(output_dir, group, "_", expression_category, "_venn_intersections.csv")
+      rds_file <- paste0(rds_output_dir, group, "_", expression_category, "_venn_intersections.rds")
+      
+      # Write CSV file
+      write_csv(venn_data, csv_file)
+      
+      # Save as RDS object
+      saveRDS(venn_data, rds_file)
+
+      message(paste("Saved CSV:", csv_file))
+      message(paste("Saved RDS:", rds_file))
+    } else {
+      message(paste("No intersections found for", group, expression_category))
+    }
+  }
+}
+
+```
+
+
+
+## Heatmap of unique and shared DEGs by group for tissue comparison
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(tidyplots)
+library(ggplot2)
+
+#Read summary_df and DE_counts_table_extended
+summary_df <- read.csv("1.DEAnalysis/output/summary_long_tissuegroupsbycontrast.csv")
+DE_counts_table_extended <- read.csv("1.DEAnalysis/output/DEG_counts_extended.csv")
+
+
+# Ensure Contrast order matches the original DE_counts_table_extended
+summary_df <- summary_df %>%
+  mutate(Contrast = factor(Contrast, levels = DE_counts_table_extended$id))
+
+# Create a list to store plots
+heatmap_plots <- list()
+
+# Loop through each group and generate a heatmap
+for (group in unique(summary_df$Group)) {
+  
+  # Filter data for the group
+  group_data <- summary_df %>% filter(Group == group)
+  
+  # Create heatmap using tidyplots
+  heatmap_plots[[group]] <- group_data |> 
+    tidyplot(x = Category, y = Contrast, color = Count) |> 
+    add_heatmap(rasterize = FALSE) |> 
+    add_mean_value() |>
+    adjust_colors(new_colors = colors_continuous_inferno, saturation = 1)
+  
+  # Print the heatmap
+  print(heatmap_plots[[group]])
+}
+
+str(heatmap_plots)
+
+
+# Save each plot individually
+
+file_base_Day2 <- paste0("Heatmap_", gsub("[^A-Za-z0-9_-]", "", "Day2"))
+save_plot(heatmap_plots[["Day2"]], file_base_Day2, width = 6.3, height = 5)
+cat("Saved heatmap for Day2 in multiple formats.\n")
+
+file_base_Day5 <- paste0("Heatmap_", gsub("[^A-Za-z0-9_-]", "", "Day5"))
+save_plot(heatmap_plots[["Day5"]], file_base_Day5, width = 6.3, height = 5)
+cat("Saved heatmap for Day5 in multiple formats.\n")
+
+file_base_RedHawk <- paste0("Heatmap_", gsub("[^A-Za-z0-9_-]", "", "RedHawk"))
+save_plot(heatmap_plots[["RedHawk"]], file_base_RedHawk, width = 6.3, height = 5)
+cat("Saved heatmap for RedHawk in multiple formats.\n")
+
+file_base_Stampede <- paste0("Heatmap_", gsub("[^A-Za-z0-9_-]", "", "Stampede"))
+save_plot(heatmap_plots[["Stampede"]], file_base_Stampede, width = 6.3, height = 5)
+cat("Saved heatmap for Stampede in multiple formats.\n")
+
+
+# Now you can save each plot using your existing save_plot() function
+for (group in names(heatmap_plots)) {
+  file_base <- paste0("Heatmap_", gsub("[^A-Za-z0-9_-]", "", group))
+  save_plot(heatmap_plots[[group]], file_base)
+  
+  cat("Saved heatmap for", group, "in multiple formats.\n")
+}
+
+
+```
+
+
+
+```{r}
+# Define custom colors for upregulated and downregulated genes
+custom_colors <- c("Unique_Upregulated" = "burlywood", 
+                   "Unique_Downregulated" = "brown4")
+
+# Convert summary table into long format for ggplot
+summary_long <- summary_df %>%
+  pivot_longer(cols = c(Unique_Upregulated, Unique_Downregulated), 
+               names_to = "Category", 
+               values_to = "Count")
+# Ensure Contrast order matches the id order from DE_counts_table_extended
+summary_long <- summary_long %>%
+  mutate(Contrast = factor(Contrast, levels = DE_counts_table_extended$id))
+
+#save summary long
+write.csv(summary_long, "1.DEAnalysis/output/summary_long_allgroups.csv", row.names = FALSE)
+
+# Generate the bar plot
+uniqueRhSt <- ggplot(summary_long, aes(x = Contrast, y = Count, fill = Category)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = custom_colors) +  # Apply custom colors
+  theme_minimal() +
+  labs(
+       x = "Contrast",
+       y = "Number of Genes",
+       fill = "Category") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+save_plot(uniqueRhSt, "uniqueRhSt", width = 6.3, height = 5)
+
+```
+
+# Plot the differential expression results
+
+## Defining functions to save plots in multiple formats
+```{r, include=FALSE}
+# Define output paths
+output_dir <- "1.DEAnalysis/figures"
+formats <- c("png", "pdf", "svg", "tiff")
+
+# Create directories if they don’t exist
+for (fmt in formats) {
+  dir.create(file.path(output_dir, fmt), showWarnings = FALSE, recursive = TRUE)
+}
+
+# Function to save plots in multiple formats
+save_plot <- function(plot, filename, width = 8, height = 6, dpi = 600) {
+  for (fmt in formats) {
+    ggsave(
+      filename = file.path(output_dir, fmt, paste0(filename, ".", fmt)),
+      plot = plot, 
+      width = width, height = height, dpi = dpi
+    )
+  }
+}
+
+```
+
+
+```{r}
+colnames(DE_counts_table_extended)
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(tidyplots)
+# Ensure required columns exist
+required_columns <- c("context", "id", "Upregulated_logFC_gt_0", "Downregulated_logFC_lt_0")
+
+if (!all(required_columns %in% colnames(DE_counts_table_extended))) {
+  stop("Missing required columns in DE_counts_table_extended.")
+}
+
+# Convert data to long format for visualization
+df_melted <- DE_counts_table_extended %>%
+  select(context, id, Upregulated_logFC_gt_0, Downregulated_logFC_lt_0) %>%
+  pivot_longer(cols = c(Downregulated_logFC_lt_0, Downregulated_logFC_lt_0), 
+               names_to = "Regulation", 
+               values_to = "Gene_Count")
+
+               # Create the bar plot
+pbar <- df_melted |>
+  tidyplot(x = context, y = Gene_Count, fill = id) |> 
+  add_sum_bar()
+# Print the plot
+pbar
+
+
+```
+
+
+
+## Top 100 and top 500 differentially expressed genes (DEGs), using log2FoldChange (log2FC)
+
+## Heatmaps of Top 100 and Top 500 DEGs based on log2FoldChange but using VST counts and Z-score scaling for visualization
+```{r}
+# Load necessary libraries
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+
+#2. Identify the Top 100 and 500 DEGs Based on log2FoldChange
+# Define threshold for significance
+padj_threshold <- 0.05  # Adjusted p-value threshold
+
+# Combine DE results from all conditions into a single dataframe
+de_combined <- bind_rows(de_results_list, .id = "Contrast")
+str(de_results_list)
+
+# Filter for significant DEGs
+de_sig <- de_combined %>% filter(padj <= padj_threshold)
+head(de_sig)
+
+# Select the top 500 and top 100 DEGs based on absolute log2FoldChange
+top1000_genes <- de_sig %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  distinct(gene_id, .keep_all = TRUE) %>%
+  head(1000) %>%
+  pull(gene_id)
+
+top500_genes <- de_sig %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  distinct(gene_id, .keep_all = TRUE) %>%
+  head(500) %>%
+  pull(gene_id)
+
+top100_genes <- de_sig %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  distinct(gene_id, .keep_all = TRUE) %>%
+  head(100) %>%
+  pull(gene_id)
+
+
+#3. Subset VST Counts for Top 100 and Top 500 DEGs
+# Extract VST-transformed expression values for the selected DEGs
+vsd_top1000 <- assay(vsd_roots)[top1000_genes, ]
+vsd_top500 <- assay(vsd_roots)[top500_genes, ]
+vsd_top100 <- assay(vsd_roots)[top100_genes, ]
+
+#4. Scale Data for Heatmap Visualization
+# Scale counts using Z-score transformation
+vsd_top1000 <- t(scale(t(vsd_top1000)))
+vsd_top500 <- t(scale(t(vsd_top500)))
+vsd_top100 <- t(scale(t(vsd_top100)))
+str(vsd_top1000)
+#5. Create Sample Annotation Dataframe
+annotation_col_roots <- data.frame(
+  Day = sampledataord_roots$Day,
+  Genotype = sampledataord_roots$Genotype,
+  Tissue = sampledataord_roots$Tissue
+)
+
+# Ensure row names align with heatmap column names
+rownames(annotation_col_roots) <- colnames(vsd_top1000)
+
+# Determine min and max values for proper scaling
+min_value_1000 <- min(vsd_top1000, na.rm = TRUE)
+max_value_1000 <- max(vsd_top1000, na.rm = TRUE)
+
+min_value_500 <- min(vsd_top500, na.rm = TRUE)
+max_value_500 <- max(vsd_top500, na.rm = TRUE)
+
+min_value_100 <- min(vsd_top100, na.rm = TRUE)
+max_value_100 <- max(vsd_top100, na.rm = TRUE)
+
+# Set midpoint scaling strategy
+midpoint_1000 <- ifelse(min_value_1000 >= 0, mean(vsd_top1000, na.rm = TRUE), 0)
+midpoint_500 <- ifelse(min_value_500 >= 0, mean(vsd_top500, na.rm = TRUE), 0)
+midpoint_100 <- ifelse(min_value_100 >= 0, mean(vsd_top100, na.rm = TRUE), 0)
+
+# Generate unique breakpoints
+paletteLength <- 50  # Define number of color breaks
+myColHeatmap <- colorRampPalette(c("blue", "white", "red"))(paletteLength)
+myBreaks_top1000 <- seq(min_value_1000, max_value_1000, length.out = paletteLength)
+myBreaks_top500 <- seq(min_value_500, max_value_500, length.out = paletteLength)
+myBreaks_top100 <- seq(min_value_100, max_value_100, length.out = paletteLength)
+
+custom_order <- c(1, 2, 4, 3)
+
+custom_clustering <- function(hclust_obj, mat) {
+  k <- 4  # Number of clusters
+  clusters <- cutree(hclust_obj, k)  # Assign clusters
+  
+  # Define custom order for clusters
+  custom_order <- c(1, 2, 4, 3)
+  
+  # Create a mapping from old cluster labels to new ones
+  new_cluster_labels <- setNames(seq_along(custom_order), custom_order)
+  
+  # Reorder clusters according to the custom order
+  reordered_clusters <- new_cluster_labels[as.character(clusters)]
+  
+  # Order dendrogram based on the new cluster labels
+  new_order <- order(reordered_clusters)
+  
+  # Convert hclust to dendrogram, reorder, and convert back
+  dend <- as.dendrogram(hclust_obj)
+  reordered_dend <- reorder(dend, new_order)
+  
+  return(as.hclust(reordered_dend))
+}
+
+#8. Generate Heatmaps for Top 500 and Top 100 DEGs
+# Top 500 Heatmap
+vsd_top500[1:4,1:4]
+
+heatmap_top500_ord <- pheatmap(vsd_top500,
+         annotation_col = annotation_col_roots,  
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = TRUE,  
+         cluster_cols = TRUE,  
+         color = myColHeatmap,#colors_diverging_icefire
+         breaks = myBreaks_top500,  
+         show_colnames = FALSE,  
+         show_rownames = FALSE,  
+         border_color = NA,
+         cutree_cols = 4,  
+         clustering_callback = custom_clustering)  
+
+heatmap_top500_ord
+str(vsd_top500)
+
+
+# Save heatmap
+save_plot(heatmap_top500_ord, "heatmap_top500_DEGs_scaledvsdcounts_zscore_clust4_ord", width = 6.3, height = 5)
+
+# Top 100 Heatmap
+heatmap_top100_ord <- pheatmap(vsd_top100,
+         annotation_col = annotation_col_roots,  
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = TRUE,  
+         cluster_cols = TRUE,  
+         color = myColHeatmap,,  
+         breaks = myBreaks_top100,  
+         show_colnames = FALSE,  
+         show_rownames = FALSE,  
+         border_color = NA,
+         cutree_cols = 4,  
+         clustering_callback = custom_clustering)  
+
+heatmap_top100_ord
+# Save heatmap
+save_plot(heatmap_top100_ord, "heatmap_top100_DEGs_scaledvsdcounts_zscore_clust4_ord", width = 6.3, height = 5)
+
+```
+
+## Heatmaps of Top 100 and Top 500 DEGs using log2FoldChange for visualization
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+
+# Define threshold for significance
+padj_threshold <- 0.05  # Adjusted p-value threshold
+
+# Combine DE results from all conditions into a single dataframe
+de_combined <- bind_rows(de_results_list, .id = "Contrast")
+
+# Filter for significant DEGs
+de_sig <- de_combined %>% filter(padj <= padj_threshold)
+
+# Select the top 500 and top 100 DEGs based on absolute log2FoldChange
+top500_genes <- de_sig %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  distinct(gene_id, .keep_all = TRUE) %>%
+  head(500) %>%
+  pull(gene_id)
+
+top100_genes <- de_sig %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  distinct(gene_id, .keep_all = TRUE) %>%
+  head(100) %>%
+  pull(gene_id)
+
+# Create a matrix of log2FoldChange values with genes as rows and conditions as columns
+logFC_matrix <- de_combined %>%
+  filter(gene_id %in% union(top500_genes, top100_genes)) %>%
+  select(gene_id, Contrast, log2FoldChange) %>%
+  tidyr::spread(Contrast, log2FoldChange)
+
+# Set row names
+rownames(logFC_matrix) <- logFC_matrix$gene_id
+logFC_matrix <- logFC_matrix[, -1]  # Remove gene column after setting row names
+
+# Subset log2FC matrices for top 100 and 500 genes
+logFC_top500 <- logFC_matrix[top500_genes, ]
+logFC_top100 <- logFC_matrix[top100_genes, ]
+
+# Scale log2FC values for visualization (optional)
+logFC_top500_scaled <- t(scale(t(logFC_top500)))
+logFC_top100_scaled <- t(scale(t(logFC_top100)))
+
+# Define color scale for log2FC values
+color_palette <- colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(50)
+
+# Generate Heatmap for Top 500 DEGs
+pheatmap(logFC_top500_scaled,
+         color = color_palette,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_colnames = TRUE,
+         show_rownames = FALSE,
+         border_color = NA,
+         main = "Top 500 DEGs log2FC Heatmap")
+
+# Generate Heatmap for Top 100 DEGs
+pheatmap(logFC_top100_scaled,
+         color = color_palette,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_colnames = TRUE,
+         show_rownames = FALSE,
+         border_color = NA,
+         main = "Top 100 DEGs log2FC Heatmap")
+
+```
+
+
+## ORA for the list of differentially expressed genes
+## Plot go terms for the list of differentially expressed genes

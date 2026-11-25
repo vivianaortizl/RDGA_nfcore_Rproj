@@ -1,5 +1,5 @@
 ---
-title: "RDGA: 1_All_Tissues_Differential_gene_expression_analysis"
+title: "RDGA: 1_All_Tissues_transcriptomic_analysis"
 author: "Viviana Ortiz"
 affiliation: "Root Haus Lab - Michigan State University"
 date: "`r format(Sys.time(), '%d %B %Y')`"
@@ -176,7 +176,7 @@ That's why I'm using the original counts and not the scaled counts for DESeq2 an
 #https://bioconductor.org/packages/devel/bioc/vignettes/tximport/inst/doc/tximport.html#3%E2%80%99_tagged_RNA-seq
 #If you have 3’ tagged RNA-seq data, then correcting the counts for gene length will induce a bias in your analysis, because the counts do not have length bias. Instead of using the default full-transcript-length pipeline, we recommend to use the original counts, e.g. txi$counts as a counts matrix, e.g. providing to DESeqDataSetFromMatrix or to the edgeR or limma functions without calculating an offset and without using countsFromAbundance.
 
-## Create DESeq object from counts instead of TPMs
+## Create DESeq object from counts 
 dds <- DESeqDataSetFromMatrix(countData = starsalmon_counts_sumexp, 
                               colData = sampledataord, 
                               design = ~Sample_ID)
@@ -186,7 +186,7 @@ dds
 
 ## Variance stabilization of counts
 This step here is to visualize the variance stabilization step and to make the PCA plot with stabilized counts. 
-This step is automatically performed by DESeq2 when running the DESeq() function.
+Normalization is automatically performed by DESeq2 when running the DESeq() function.
 ```{r counts stabilization}
 
 # Variance stabilization
@@ -357,13 +357,13 @@ explained_variance <-
 # Save R environment until here
 ```{r}
 #Save R
-#save.image("RDGA_alltissues.RData")
+#save.image("1.DEAnalysis/1_RDGA_Alltissues.RData")
 ```
 
 # Load R environment, if starting from here
 ```{r}
 #Load R
-#load("RDGA_alltissues.RData")
+#load("1.DEAnalysis/1_RDGA_Alltissues.RData")
 ```
 
 
@@ -412,7 +412,7 @@ root_ids <- sampledata %>%
   filter(!Tissue == "Leaf") %>% 
   pull(sample)
 
-#Filter t_variance_stabilised_counts to only rows with LAUZ_taproot in lauz_ids vector
+#Filter t_variance_stabilised_counts to only roots
 t_variance_stabilised_counts_roots <- t_variance_stabilised_counts[root_ids,]
 
 
@@ -492,6 +492,7 @@ pca_roots
 #ggsave(plot = pca_roots_tissue, "figures_all/pca_only_roots_coltissueleg3_6x7.pdf", dpi = 600, units = "in", height = 6, width = 7)
 #ggsave(plot = pca_roots_tissue, "figures_all/pca_only_roots_coltissueleg3_6x7.svg", dpi = 600, units = "in", height = 6, width = 7)
 
+
 ```
 
 
@@ -506,10 +507,10 @@ subsets <- list(
   alltissues = sampledata %>% pull(sample),
   lauztips = sampledata %>% filter(Tissue %in% c("AUZTaproot", "RootTipTaproot")) %>% pull(sample),
   root_only = sampledata %>% filter(Tissue != "Leaf") %>% pull(sample),
-  auztbtips = sampledata %>% filter(Tissue %in% c("AUZTaproot", "RootTipTaproot", "AUZBasalRoots", "RootTipsBasalRoots")) %>% pull(sample),
+  auztbtips = sampledata %>% filter(Tissue %in% c("AUZTaproot", "RootTipTaproot", "AUZBasalRoots", "RootTipBasalRoots")) %>% pull(sample),
   tips = sampledata %>% filter(Tissue %in% c("RootTipTaproot", "RootTipBasalRoots")) %>% pull(sample),
   hyporc = sampledata %>% filter(Tissue %in% c("Hypocotyl", "RootCrown")) %>% pull(sample),
-  d2d5 = sampledata %>% filter(Tissue %in% c("RootCrown", "AUZTaproot", "RootTipsTaproot")) %>% pull(sample),
+  d2d5 = sampledata %>% filter(Tissue %in% c("RootCrown", "AUZTaproot", "RootTipTaproot")) %>% pull(sample),
   auzmbzybz = sampledata %>% filter(Tissue %in% c("AUZTaproot", "AUZBasalRoots", "MatureBranchedZoneTaproot", "YoungBranchedZoneTaproot")) %>% pull(sample),
   day5 = sampledata %>% filter(Day == "day5" & Tissue != "Leaf") %>% pull(sample),
   day2 = sampledata %>% filter(Day == "day2" & Tissue != "Leaf") %>% pull(sample)
@@ -576,8 +577,7 @@ generate_pca_plots <- function(subset_name, sample_ids, color_by, shape_by, colo
     cat("Skipping", subset_name, "- Not enough samples for PCA\n")
     return(NULL)
   }
-  
-  # Perform PCA
+
   pca_results <- mypca(subset_counts, center = TRUE, scale = TRUE)
   scores <- pca_results$scores
   
@@ -624,7 +624,7 @@ for (subset_name in names(subsets)) {
 
 ```{r}
 #Save R
-#save.image("RDGA_alltissues.RData")
+#save.image("1.DEAnalysis/1_RDGA_Alltissues.RData")
 ```
 
 
@@ -721,8 +721,6 @@ permanova_result$aov.tab
 #by terms, see R2 for each term
 
 
-
-
 permanova_result <- adonis2( scores[,2:ncol(scores)] ~ Genotype, data = sampledata2, method = "euclidean")
 permanova_result
 
@@ -740,9 +738,7 @@ permanova_result
 
 
 ## Differential expression analysis
-Differential gene expression analysis will consist of simply two lines of code:
-
-The first will call the DESeq function on a DESeqDataSet object that you’ve just created under the name dds. 
+First will call the DESeq function on a DESeqDataSet object that you’ve just created under the name dds. 
 It will be returned under the same R object name dds.
 Then, results are extracted using the results function on the dds object and results will be extracted as a table under the name res (short for results).
 
@@ -752,17 +748,763 @@ Red Hawk is the reference level, so the fold change will be calculated as Stampe
 The fold change will be positive if Stampede is higher than Red Hawk, and negative if Stampede is lower than Red Hawk.
 
 ```{r DE analysis}
-## Create DESeq object from counts instead of TPMs
-dds <- DESeqDataSetFromMatrix(countData = txi.salmon$counts, 
-                              colData = sampledata, 
-                              design = ~Tissue + Genotype + Condition)
-dds$Genotype 
+## Create DESeq object from counts 
+dds <- DESeqDataSetFromMatrix(countData = starsalmon_counts_sumexp, 
+                              colData = sampledataord, 
+                              design = ~Sample_ID)
+dds
+#DESeq2 recommends using variance-stabilizing transformation (VST) or rlog transformation instead of raw counts for visualization.vsd
+                             
 dds <- DESeq(dds)
-res <- results(dds)
+```
+
+## Heatmap of sample to sample distances
+
+```{r}
+##Heatmap of sample to sample distances 
+# Load necessary libraries
+library(pheatmap)
+library(RColorBrewer)
+library(scales)  # For showing colors
+library(grDevices)
+
+#using the Variance Stabilizing Transformation (vsd object created above)
+sampleDists <- dist(t(assay(vsd)))  
+sampleDistMatrix <- as.matrix(sampleDists)
+ 
+#rownames(sampleDistMatrix) <- vsd$Sample_ID
+#colnames(sampleDistMatrix) <- rownames(sampleDistMatrix)
+
+
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+
+# Ensure the tissue palette is assigned correctly
+tissue_palette <- setNames(my_pal_RDGA_leaf, tissue_levels)
+
+day_palette <- c("day2" = "grey70", "day5" = "black", "day7" = "forestgreen")
+geno_palette <- c("RedHawk" = "brown4", "Stampede" = "burlywood")
+
+# Define metadata annotation colors (using your predefined palettes)
+metadata_roots_ann_colors <- list(
+  Day = day_palette,  # Uses predefined day_palette
+  Genotype = geno_palette,  # Uses predefined geno_palette
+  Tissue = tissue_palette  # Uses predefined tissue_palette
+)
+##Here important to have the same order of the columns in the metadata and the rows in the heatmap
+##Here I need to use sampledataord instead of sampledata
+# Create annotation dataframe (Make sure row names match heatmap column names)
+annotation_col <- data.frame(
+  Day = sampledataord$Day,  
+  Genotype = sampledataord$Genotype,
+  Tissue = sampledataord$Tissue
+)
+
+colnames(sampleDistMatrix)
+rownames(annotation_col)
+
+# Ensure row names align with heatmap column names
+rownames(annotation_col) <- colnames(assay(vsd))  
+
+library(ArchR)
+paletteLength <- 50
+#this palette is red to white to blue because smaller distances are more similar, so we want them to be red
+myColor <- colorRampPalette(c("red", "white", "blue"))(paletteLength)
+
+
+# Ensure unique breaks
+min_value <- min(sampleDistMatrix)
+max_value <- max(sampleDistMatrix)
+
+# Check if min_value is positive; adjust scaling if necessary
+if (min_value >= 0) {
+  # If all values are positive, shift the center to the mean
+  midpoint <- mean(sampleDistMatrix)  
+} else {
+  # Otherwise, use zero as the center
+  midpoint <- 0
+}
+
+# Generate unique breakpoints for proper scaling
+myBreaks <- seq(min_value, max_value, length.out = paletteLength)
+
+# Generate the heatmap with proper annotations
+pheatmap(sampleDistMatrix,
+         annotation_col = annotation_col,
+         annotation_colors = metadata_roots_ann_colors,  # Apply annotation colors
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         color = myColor,
+         breaks = myBreaks,# Heatmap color scale
+         )
+
+print(colnames(sampleDistMatrix))  # Check column names of heatmap matrix
+print(rownames(annotation_col))  # Check row names of annotations
+head(annotation_col)  # Check annotation data
+
+# Ensure Tissue is a factor with the correct order
+annotation_col$Tissue <- factor(annotation_col$Tissue, levels = tissue_levels)
+
+# Order the sample names based on the tissue order
+ordered_samples <- rownames(annotation_col)[order(annotation_col$Tissue)]
+
+# Ensure ordered_samples exist in sampleDistMatrix
+ordered_samples <- ordered_samples[ordered_samples %in% colnames(sampleDistMatrix)]
+
+# Reorder both rows and columns in the matrix and annotation data
+sampleDistMatrix <- sampleDistMatrix[ordered_samples, ordered_samples]
+annotation_col <- annotation_col[ordered_samples, ]
+
+
+# Generate the heatmap with proper annotations & ordered columns
+pheatmap(sampleDistMatrix,
+         annotation_col = annotation_col,
+         annotation_colors = metadata_roots_ann_colors,  
+         clustering_distance_rows = sampleDists,
+         cluster_cols = FALSE,  # Disable clustering to keep the order
+         color = myColor,
+         breaks = myBreaks,  
+         show_colnames = FALSE,  # Hide sample labels
+         )
+#####
+
+#Heatmap with annotations in both rows and columns
+
+# Create row annotations (same as columns)
+annotation_row <- annotation_col  # Ensures row order matches column order
+
+# Generate the heatmap with both row and column annotations (no clustering)
+heatmap_sampledist <- pheatmap(sampleDistMatrix,
+         annotation_col = annotation_col,  # Column annotations
+         annotation_row = annotation_row,  # Row annotations (same order)
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = FALSE,  # Disable row clustering
+         cluster_cols = FALSE,  # Disable column clustering
+         color = myColor,
+         breaks = myBreaks,  
+         show_colnames = FALSE,  # Hide sample labels
+         show_rownames = FALSE,  # Hide row labels
+         border_color = NA)
+heatmap_sampledist 
+#save plot with save_plot function and changing dimensions
+save_plot(heatmap_sampledist, "heatmap_sampledist_square", width = 5.8, height = 3.64)
+
+
+
+```
+
+### Heatmap of sample to sample distances for roots only
+```{r}
+# Subset sampledataord to only roots
+sampledataord_roots  <- sampledataord %>%
+  filter(!(Tissue == "Leaf"))
+
+root_ids <- sampledataord_roots$sample
+
+roots_counts <- starsalmon_counts_sumexp[,root_ids]
+
+# Create DESeq object for roots
+
+dds_roots <- DESeqDataSetFromMatrix(countData = roots_counts, 
+                                    colData = sampledataord_roots, 
+                                    design = ~Sample_ID)
+
+                                    
+                                  
+dds_roots <- DESeq(dds_roots)
+
+# Extract variance-stabilized counts for roots
+vsd_roots <- varianceStabilizingTransformation(dds_roots, blind = TRUE)
+
+# Calculate sample-to-sample distances for roots
+roots_sampleDists <- dist(t(assay(vsd_roots)))
+roots_sampleDistMatrix <- as.matrix(roots_sampleDists)
+
+ncol(roots_counts)  # Number of samples in the count matrix
+nrow(sampledataord_roots)  # Number of samples in the metadata
+ncol(assay(vsd_roots))  # Number of samples in the variance-stabilized matrix
+
+
+# Create annotation dataframe for roots
+annotation_col_roots <- data.frame(
+  Day = sampledataord_roots$Day,
+  Genotype = sampledataord_roots$Genotype,
+  Tissue = sampledataord_roots$Tissue
+)
+
+# Ensure row names align with heatmap column names
+rownames(annotation_col_roots) <- colnames(assay(vsd_roots))
+
+# Ensure Tissue is a factor with the correct order
+annotation_col_roots$Tissue <- factor(annotation_col_roots$Tissue, levels = tissue_levels)
+
+# Order the sample names based on the tissue order
+ordered_samples <- rownames(annotation_col_roots)[order(annotation_col_roots$Tissue)]
+
+# Ensure ordered_samples exist in sampleDistMatrix
+ordered_samples <- ordered_samples[ordered_samples %in% colnames(roots_sampleDistMatrix)]
+
+# Reorder both rows and columns in the matrix and annotation data
+roots_sampleDistMatrix <- roots_sampleDistMatrix[ordered_samples, ordered_samples]
+
+annotation_col_roots <- annotation_col_roots[ordered_samples, ]
+#Heatmap with annotations in both rows and columns
+
+# Create row annotations (same as columns)
+annotation_row_roots <- annotation_col_roots # Ensures row order matches column order
+
+#Ensure unique breaks
+#min_value <- min(roots_sampleDistMatrix)
+#max_value <- max(roots_sampleDistMatrix)
+
+# Check if min_value is positive; adjust scaling if necessary
+if (min_value >= 0) {
+  # If all values are positive, shift the center to the mean
+  midpoint <- mean(roots_sampleDistMatrix)  
+} else {
+  # Otherwise, use zero as the center
+  midpoint <- 0
+}
+
+# Generate unique breakpoints for proper scaling
+#myBreaks_roots <- seq(min_value, max_value, length.out = paletteLength)
+
+length(colors_diverging_icefire)
+length(colors_continuous_mako)
+colors_diverging_icefire
+colors_continuous_mako
+
+myBreaks2 <- seq(min_value, max_value, length.out = length(colors_diverging_icefire))
+myBreaks3 <- seq(min_value, max_value, length.out = length(colors_diverging_spectral))
+
+#reverse colors_diverging_icefire for distance
+colors_diverging_icefire_rev <- rev(colors_diverging_icefire)
+colors_diverging_spectral_rev <- rev(colors_diverging_spectral)
+
+
+# Generate the heatmap with both row and column annotations (no clustering)
+heatmap_sampledist_roots <- pheatmap(roots_sampleDistMatrix,
+         annotation_col = annotation_col_roots,  # Column annotations
+         annotation_row = annotation_row_roots,  # Row annotations (same order)
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = FALSE,  # Disable row clustering
+         cluster_cols = FALSE,  # Disable column clustering
+         color = myColor,#colors_diverging_spectral_rev
+         breaks = myBreaks,  
+         show_colnames = FALSE,  # Hide sample labels
+         show_rownames = FALSE,  # Hide row labels
+         border_color = NA)
+heatmap_sampledist_roots 
+#save plot with save_plot function and changing dimensions
+save_plot(heatmap_sampledist_roots, "heatmap_sampledist_roots_sm_square", width = 5.8, height = 3.64)
+
+```
+
+## Heatmap of Pearson correlation coefficients (PCC) between samples (instead of distances), 
+## and to compute PCC between replicates within each Sample_ID
+
+## Heatmap of Pearson correlation coefficients (PCC) between samples including leaf tissue
+
+```{r}
+#1. Calculate Pearson correlation matrix
+# Calculate Pearson correlation between samples
+sampleCorrMatrix <- cor(assay(vsd), method = "pearson")
+# Reorder the matrix and annotations
+sampleCorrMatrix <- sampleCorrMatrix[ordered_samples, ordered_samples]
+#2. Plot heatmap of PCC
+library(pheatmap)
+library(tidyplots)
+
+
+# Create custom color palette (red = high similarity)
+library(ArchR)
+paletteLength <- 50     
+myColorCor <- colorRampPalette(c("blue", "white", "red"))(paletteLength)
+# Calculate breaks for correlation matrix
+min_cor <- min(sampleCorrMatrix)
+max_cor <- max(sampleCorrMatrix)      
+
+if (min_cor >= 0) {
+  midpoint <- mean(sampleCorrMatrix)
+} else {
+  midpoint <- 0
+}               
+myBreaksCor <- seq(min_cor, max_cor, length.out = paletteLength)  
+# Reorder annotation columns to: Tissue (top), Day, Genotype
+annotation_col <- annotation_col[, c("Genotype", "Day", "Tissue")]
+annotation_row <- annotation_col  # Use same structure for rows 
+# Heatmap using Pearson correlation (no clustering, same annotations)
+heatmap_samplecorr <- pheatmap(sampleCorrMatrix,
+         annotation_col = annotation_col, 
+          annotation_row = annotation_row,
+          annotation_colors = metadata_roots_ann_colors,  
+          cluster_rows = FALSE,
+          cluster_cols = FALSE,
+          color = myColorCor, 
+          breaks = myBreaksCor,     
+          show_colnames = FALSE,
+          show_rownames = FALSE,          
+          border_color = NA)
+heatmap_samplecorr  
+# Save
+save_plot(heatmap_samplecorr, "heatmap_Pearsoncorr_leaf_square", width =
+  5.8, height = 3.64) 
+```
+
+## Heatmap of Pearson correlation coefficients (PCC) between samples for roots only
+```{r}
+#1. Calculate Pearson correlation matrix
+# Calculate Pearson correlation between samples
+roots_sampleCorrMatrix <- cor(assay(vsd_roots), method = "pearson")
+
+# Reorder the matrix and annotations
+roots_sampleCorrMatrix <- roots_sampleCorrMatrix[ordered_samples, ordered_samples]
+
+#2. Plot heatmap of PCC
+library(pheatmap)
+library(tidyplots)
+colors_diverging_icefire #from tidyplots
+
+# Create custom color palette (red = high similarity)
+library(ArchR)
+paletteLength <- 50
+myColorCor <- colorRampPalette(c("blue", "white", "red"))(paletteLength)
+
+# Calculate breaks for correlation matrix
+min_cor <- min(roots_sampleCorrMatrix)
+max_cor <- max(roots_sampleCorrMatrix)
+
+if (min_cor >= 0) {
+  midpoint <- mean(roots_sampleCorrMatrix)
+} else {
+  midpoint <- 0
+}
+
+myBreaksCor <- seq(min_cor, max_cor, length.out = paletteLength)
+
+
+# Reorder annotation columns to: Tissue (top), Day, Genotype
+annotation_col_roots <- annotation_col_roots[, c("Genotype", "Day", "Tissue")]
+annotation_row_roots <- annotation_col_roots  # Use same structure for rows
+
+
+# Heatmap using Pearson correlation (no clustering, same annotations)
+heatmap_samplecorr_roots <- pheatmap(roots_sampleCorrMatrix,
+         annotation_col = annotation_col_roots,
+         annotation_row = annotation_row_roots,
+         annotation_colors = metadata_roots_ann_colors,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         color = myColorCor, #colors_diverging_spectral,  # Or another preferred color scale
+         #breaks = seq(min(roots_sampleCorrMatrix), max(roots_sampleCorrMatrix), length.out = length(colors_diverging_icefire)),
+         breaks = myBreaksCor,
+         show_colnames = FALSE,
+         show_rownames = FALSE,
+         border_color = NA)
+         
+# Save
+save_plot(heatmap_samplecorr_roots, "heatmap_Pearsoncorr_roots_square", width = 5.8, height = 3.64)
+
+
+#3. Extract only replicate PCCs from the heatmap matrix:
+#by Sample ID
+library(dplyr)
+library(purrr)
+library(tidyr)
+
+# Full sample-to-sample PCC matrix from vst values
+roots_sampleCorrMatrix <- cor(assay(vsd_roots), method = "pearson")
+
+# Sample metadata
+sample_info <- as.data.frame(colData(vsd_roots)) %>%
+  mutate(sample = colnames(assay(vsd_roots)))
+
+# Extract PCCs between replicates for each Sample_ID and summarize
+replicate_pcc_summary <- sample_info %>%
+  dplyr::group_by(Sample_ID) %>%
+  dplyr::filter(n() > 1) %>%
+  dplyr::summarise(
+    replicate_pairs = list(combn(sample, 2, simplify = FALSE)),
+    PCCs = list(map_dbl(replicate_pairs[[1]], ~ roots_sampleCorrMatrix[.x[1], .x[2]])),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    n_pairs = lengths(PCCs),
+    mean_PCC = map_dbl(PCCs, mean),
+    sd_PCC = map_dbl(PCCs, sd),
+    min_PCC = map_dbl(PCCs, min),
+    max_PCC = map_dbl(PCCs, max)
+  ) %>%
+  dplyr::select(Sample_ID, n_pairs, mean_PCC, sd_PCC, min_PCC, max_PCC)
+
+# View table
+replicate_pcc_summary
+
+# Save the summary table
+write.csv(replicate_pcc_summary, "1.DEAnalysis/output/replicate_pcc_summary_roots.csv", row.names = FALSE)
+
+# Summary across all Sample_IDs
+replicate_pcc_overall_summary <- replicate_pcc_summary %>%
+  dplyr::summarise(
+    total_sample_ids = n(),
+    total_pairs = sum(n_pairs),
+    mean_of_means = mean(mean_PCC),
+    sd_of_means = sd(mean_PCC),
+    overall_min_PCC = min(min_PCC),
+    overall_max_PCC = max(max_PCC)
+  )
+
+# View result
+replicate_pcc_overall_summary
+# Save overall summary
+write.csv(replicate_pcc_overall_summary, "1.DEAnalysis/output/replicate_pcc_overall_summary_roots.csv", row.names = FALSE)
+
+#total_sample_ids total_pairs mean_of_means sd_of_means overall_min_PCC overall_max_PCC
+#             <int>       <int>         <dbl>       <dbl>           <dbl>
+#               22          66         0.980     0.00405           0.967c 0.988
+
+
+
+## Heatmap of most variable genes for roots only
+
+```{r}
+# Load required libraries
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+
+
+# Identify the top 500 most variable genes across root samples
+top_var_genes <- head(order(rowVars(assay(vsd_roots)), decreasing = TRUE), 500)
+
+# Subset VST counts for the top 500 most variable genes
+vsd_top500 <- assay(vsd_roots)[top_var_genes, ]
+
+
+# Scale counts for visualization
+vsd_top500 <- t(scale(t(vsd_top500)))
+
+# Create annotation dataframe for samples
+annotation_col_roots <- data.frame(
+  Day = sampledataord_roots$Day,
+  Genotype = sampledataord_roots$Genotype,
+  Tissue = sampledataord_roots$Tissue
+)
+
+#Ensure unique breaks
+min_value <- min(vsd_top500)
+max_value <- max(vsd_top500)
+
+# Check if min_value is positive; adjust scaling if necessary
+if (min_value >= 0) {
+  # If all values are positive, shift the center to the mean
+  midpoint <- mean(roots_sampleDistMatrix)  
+} else {
+  # Otherwise, use zero as the center
+  midpoint <- 0
+}
+
+# Generate unique breakpoints for proper scaling
+myBreaks_top500 <- seq(min_value, max_value, length.out = paletteLength)
+
+
+# Ensure row names align with heatmap column names
+rownames(annotation_col_roots) <- colnames(vsd_top500)
+
+
+
+#Heatmap
+# Generate the heatmap with both row and column annotations (no clustering)
+heatmap_top500 <- pheatmap(vsd_top500,
+         annotation_col = annotation_col_roots,  # Column annotations
+        #annotation_row = annotation_row_roots,  # Row annotations (same order)
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = TRUE,  # Disable row clustering
+         cluster_cols = TRUE,  # Disable column clustering
+         color = myColHeatmap,
+         breaks = myBreaks_top500,  
+         show_colnames = FALSE,  # Hide sample labels
+         show_rownames = FALSE,  # Hide row labels
+         border_color = NA) 
+
+heatmap_top500
+#save plot with save_plot function and changing dimensions
+save_plot(heatmap_top500, "heatmap_top500_scaledvsdcounts_zscore", width = 6.3, height = 5)
+
+#Add col gaps between big column clusters
+heatmap_top500 <- pheatmap(vsd_top500,
+         annotation_col = annotation_col_roots,  # Column annotations
+        #annotation_row = annotation_row_roots,  # Row annotations (same order)
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = TRUE,  # Disable row clustering
+         cluster_cols = TRUE,  # Disable column clustering
+         color = myColHeatmap,
+         breaks = myBreaks_top500,  
+         show_colnames = FALSE,  # Hide sample labels
+         show_rownames = FALSE,  # Hide row labels
+         border_color = NA,
+         gaps_col = 1)  # Add column gaps
+heatmap_top500
+
+
+heatmap_top500 <- pheatmap(vsd_top500,
+         annotation_col = annotation_col_roots,  # Column annotations
+        #annotation_row = annotation_row_roots,  # Row annotations (same order)
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = TRUE,  # Enable row clustering
+         cluster_cols = TRUE,  # Enable column clustering
+         color = myColHeatmap,
+         breaks = myBreaks_top500,  
+         show_colnames = FALSE,  # Hide sample labels
+         show_rownames = FALSE,  # Hide row labels
+         border_color = NA,
+         cutree_cols = 4)  # Adjust the number of clusters as needed
+
+heatmap_top500
+save_plot(heatmap_top500, "heatmap_top500_scaledvsdcounts_zscore_clust4", width = 6.3, height = 5)
+
+# Define your specific order for the clusters
+# For example, if you want to order clusters 
+#specific_order <- c(2, 3, 1, 4)
+
+# Custom clustering function to reorder columns
+custom_clustering <- function(hclust_obj, mat) {
+  # Number of clusters
+  k <- 4
+  
+  # Cut the dendrogram into k clusters
+  clusters <- cutree(hclust_obj, k)
+  
+  # Reorder the columns based on the clusters
+  order <- order(clusters)
+  
+  # Return the reordered dendrogram
+  as.hclust(reorder(hclust_obj, order))
+}
+
+colors_diverging_icefire #from tidyplots
+
+# Generate the heatmap with custom column clustering
+heatmap_top500_ord <- pheatmap(vsd_top500,
+         annotation_col = annotation_col_roots,  # Column annotations
+        #annotation_row = annotation_row_roots,  # Row annotations (same order)
+         annotation_colors = metadata_roots_ann_colors,  
+         cluster_rows = TRUE,  # Enable row clustering
+         cluster_cols = TRUE,  # Enable column clustering
+         color = myColHeatmap, #colors_diverging_icefire
+         breaks = myBreaks_top500,  
+         show_colnames = FALSE,  # Hide sample labels
+         show_rownames = FALSE,  # Hide row labels
+         border_color = NA,
+         cutree_cols = 4,  # Adjust the number of clusters as needed
+         clustering_callback = custom_clustering)  # Use custom clustering function
+
+save_plot(heatmap_top500_ord, "heatmap_top500_scaledvsdcounts_zscore_clust4_ord", width = 6.3, height = 5)
+```
+
+
+## Expressed gene per sample
+
+```{r}
+# Extract raw counts
+raw_counts <- counts(dds_roots, normalized=FALSE)
+head(raw_counts)
+# Define threshold: expressed if count > 10
+expressed_genes <- raw_counts > 10  
+head(expressed_genes)
+
+# Count genes expressed per sample
+genes_per_sample <- colSums(expressed_genes)
+
+# Convert to dataframe
+genes_per_sample_df <- data.frame(sample = colnames(raw_counts), 
+                                  Expressed_Genes = genes_per_sample)
+
+
+# Check column names before merging
+intersect(colnames(genes_per_sample_df), colnames(sampledataord_roots))
+
+# Check structure and unique sample values
+str(genes_per_sample_df$sample)
+str(sampledataord_roots$sample)
+
+# Convert to tibble and merge using _join
+genes_per_sample_df <- as.data.frame(genes_per_sample_df) %>%
+  left_join(sampledataord_roots, by = "sample")
+
+# Check if grouping columns exist
+print(colnames(genes_per_sample_df))
+
+# Display the table
+print(genes_per_sample_df)
+str(genes_per_sample_df)  # Check structure
+```
+
+## Summarize expressed genes by Tissue, Day, and Genotype
+
+```{r}
+library(dplyr)
+genes_per_tissue <- genes_per_sample_df %>%
+  mutate(Tissue = as.character(Tissue)) %>%  # Ensure Tissue is not a factor
+  group_by(Tissue) %>%
+  dplyr::summarise(
+    Mean_Expressed_Genes = round(mean(Expressed_Genes, na.rm = TRUE), 0),  
+    Median_Expressed_Genes = round(median(Expressed_Genes, na.rm = TRUE), 0),
+    Total_Expressed_Genes = round(sum(Expressed_Genes, na.rm = TRUE), 0),
+    Sample_Count = n(),  # Number of replicates per tissue
+    .groups = "drop"
+  )
+
+# Ensure Tissue is a factor with the correct order
+genes_per_tissue$Tissue <- factor(genes_per_tissue$Tissue, levels = tissue_levels)
+
+# Reorder the dataframe based on tissue order
+genes_per_tissue <- genes_per_tissue[order(genes_per_tissue$Tissue), ]
+
+# Display results
+print(genes_per_tissue)
+
+#Save the table
+write.csv(genes_per_tissue, "1.DEAnalysis/output/expressed_genes_per_tissue.csv")
+
+# Display results
+print(genes_per_tissue)
+
+genes_per_group <- genes_per_sample_df %>%
+  group_by(Tissue, Day, Genotype) %>%
+  dplyr::summarise(
+    Mean_Expressed_Genes = round(mean(Expressed_Genes, na.rm = TRUE), 0),  
+    Median_Expressed_Genes = round(median(Expressed_Genes, na.rm = TRUE), 0),
+    Total_Expressed_Genes = round(sum(Expressed_Genes, na.rm = TRUE), 0),
+    Sample_Count = n(),  # Number of replicates per tissue
+    .groups = "drop"
+  )
+genes_per_group
+
+# Ensure Tissue is a factor with the correct order
+genes_per_group$Tissue <- factor(genes_per_group$Tissue, levels = tissue_levels)
+
+# Reorder the dataframe based on tissue order
+genes_per_group <- genes_per_group[order(genes_per_group$Tissue), ]
+
+# Display results
+print(genes_per_group)
+
+#Save the table
+write.csv(genes_per_group, "1.DEAnalysis/output/expressed_genes_per_group.csv")
+library(ggplot2)
+library(tidyplots)
+
+root_tissue_levels <- c("Hypocotyl", "RootCrown", "MatureBranchedZoneTaproot", "YoungBranchedZoneTaproot", 
+                   "AUZTaproot", "AUZBasalRoots", "RootTipTaproot", "RootTipBasalRoots")
+
+
+p <- genes_per_sample_df |> 
+  mutate(Tissue = factor(Tissue, levels = root_tissue_levels)) |>  # Ensure correct order
+  tidyplot(x = Tissue, y = Expressed_Genes, color = Tissue) |> 
+  add_violin(draw_quantiles = 0.5) |> 
+  add_data_points_beeswarm() |>
+  adjust_colors(new_colors = my_pal_RDGA) |>
+  adjust_y_axis(limits = c(12050, 16800)) |>
+  adjust_y_axis(title = "Expressed genes") |>
+  #djust_legend_position("bottom") |>
+  remove_x_axis_labels() |> 
+  remove_x_axis_title() |> 
+  remove_x_axis_ticks()
+p
+save_plot(p, "expressed_genes_per_tissue_violin_leg", width = 6, height = 4) 
+
+
+p <- genes_per_sample_df |> 
+  mutate(Tissue = factor(Tissue, levels = root_tissue_levels)) |>  # Ensure correct order
+  tidyplot(x = Tissue, y = Expressed_Genes, color = Genotype) |> 
+  add_violin(draw_quantiles = 0.5) |> 
+  add_data_points_beeswarm() |>  
+  adjust_colors(new_colors = geno_palette) |>  
+  adjust_y_axis(limits = c(12050, 16800)) |>
+  adjust_y_axis(title = "Expressed genes") |>
+  adjust_legend_position("bottom") |>  
+  remove_x_axis_labels() |> 
+  remove_x_axis_title() |> 
+  remove_x_axis_ticks()
+p
+save_plot(p, "expressed_genes_per_tissueGeno_violin", width = 6, height = 4) 
+
+
+
+p <- genes_per_sample_df |> 
+  mutate(Tissue = factor(Tissue, levels = root_tissue_levels)) |>  # Ensure correct order
+  tidyplot(x = Genotype, y = Expressed_Genes, color = Genotype) |> 
+  add_violin(draw_quantiles = 0.5) |> 
+  add_data_points_beeswarm() |>  
+  adjust_colors(new_colors = geno_palette) |>  
+  adjust_y_axis(limits = c(12050, 16800)) |>
+  adjust_y_axis(title = "Expressed genes") |>
+  adjust_legend_position("bottom") |>  
+  remove_x_axis_labels() |> 
+  remove_x_axis_title() |> 
+  remove_x_axis_ticks()
+p
+save_plot(p, "expressed_genes_per_Geno_violin", width = 6, height = 4) 
+
+
+day_palette_leaf <- c("day2" = "grey70", "day5" = "black", "day7" = "forestgreen")
+
+p <- genes_per_sample_df |> 
+  mutate(Tissue = factor(Tissue, levels = root_tissue_levels)) |>  # Ensure correct order
+  tidyplot(x = Tissue, y = Expressed_Genes, color = Day) |> 
+  add_violin(draw_quantiles = 0.5) |> 
+  add_data_points_beeswarm() |>  
+  adjust_colors(new_colors = day_palette_leaf) |>
+  adjust_y_axis(limits = c(12050, 16800)) |>
+  adjust_y_axis(title = "Expressed genes") |> 
+  adjust_legend_position("bottom") |> 
+  remove_x_axis_labels() |> 
+  remove_x_axis_title() |> 
+  remove_x_axis_ticks()
+p
+save_plot(p, "expressed_genes_per_tissueDay_violin", width = 6, height = 4) 
+
+
+p <- genes_per_sample_df |> 
+  mutate(Tissue = factor(Tissue, levels = root_tissue_levels)) |>  # Ensure correct order
+  tidyplot(x = Day, y = Expressed_Genes, color = Day) |> 
+  add_violin(draw_quantiles = 0.5) |> 
+  add_data_points_beeswarm() |>  
+  adjust_colors(new_colors = day_palette_leaf) |>
+  adjust_y_axis(limits = c(12050, 16800)) |>
+  adjust_y_axis(title = "Expressed genes") |> 
+  adjust_legend_position("bottom") |> 
+  remove_x_axis_labels() |> 
+  remove_x_axis_title() |> 
+  remove_x_axis_ticks()
+p
+save_plot(p, "expressed_genes_per_Day_violin", width = 6, height = 4) 
+```
+
+
+# Save R environment for all 1_RDGA_Alltissues
+```{r}
+#Save R
+#save.image("1.DEAnalysis/1_RDGA_Alltissues.RData")
+```
+
+
+
+```{r}
+dds_roots
+attr(dds_roots, "modelMatrix")
+res <- results(dds_roots)
 res
 head(res)
+resultsNames(dds)
+dds$Genotype
+dds$Sample_ID #the default reference level is: "day_3_taproot_LAUZ_Redhawk_East_Lansing_MI_T1"
 
-dds$Exp #the default reference level is: "day_3_taproot_LAUZ_Redhawk_East_Lansing_MI_T1"
 
 all_genes_results <- results(dds, contrast = c("Genotype",                      # name of the factor
                                   "Stampede",    # name of the numerator level for fold change
@@ -798,11 +1540,10 @@ hist(all_genes_results$padj, col="lightblue", main = "Adjusted p-value distribut
 hist(all_genes_results$pvalue, col="grey", main = "Non-adjusted p-value distribution")
 ```
 
-We obtained 2746 differentially expressed genes at 0.01 and 1818 at 0.001 which are quite important numbers: 
-indeed, it corresponds to respectively ~10% and ~6% of the whole number transcriptome (total number of mRNA is 27,416).
+We obtained 2746 differentially expressed genes at 0.01 and 1818 at 0.001 which correspond to respectively ~10% and ~6% of the whole number transcriptome (total number of mRNA is 27,416).
 
 
-## Table of differentially expresed genes: Genotype main effect (Red Hawk vs Stampede) regardless of day
+## Table of differentially expresed genes: Genotype main effect (Red Hawk vs Stampede) regardless of day (averaged over tissue and day)
 Extract a nicely filtered final table of differential genes
 
 ```{r DE table}
@@ -881,7 +1622,7 @@ unique(sampledata2$Exp)
 #Exp column is a factor
 sampledata2$Exp <- as.factor(sampledata2$Exp)
 
-## Create DESeq object from counts instead of TPMs
+## Create DESeq object from counts 
 ddsExp <- DESeqDataSetFromMatrix(countData = txi.salmon$counts, 
                               colData = sampledata2, 
                               design = ~Exp)
@@ -1550,8 +2291,11 @@ counts_scaled_filtered =
 head(counts_scaled_filtered)
 colnames(counts_scaled_filtered)
 
+
+
+
 #Annotated heatmap
-anno_col_info = sampledata2 #%>% column_to_rownames("sample")
+anno_col_info = sampledata #%>% column_to_rownames("sample")
 head(anno_col_info)
 rownames(anno_col_info)
 anno_col_info <- anno_col_info[,c("Genotype","Condition")]
